@@ -1,0 +1,71 @@
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {createServer} from 'node:http';
+import {readFile,mkdir} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {createHash} from 'node:crypto';
+import {chromium} from 'playwright';
+import JSZip from 'jszip';
+
+const port=4184,base=`http://127.0.0.1:${port}`,results=resolve('test-results');
+await mkdir(results,{recursive:true});
+let serverOutput='',browser,fixture,child;
+const passed=[]; const pass=label=>{passed.push(label);console.log('PASS '+label);};
+const post=async(path,data,extra={})=>{const r=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json',...extra},body:JSON.stringify(data)});return{status:r.status,data:await r.json()};};
+const visionResult={description:'Test provider fixture: measured blue reference, not a live model result.',colors:{canvas:'#f5f5f7',ink:'#1d1d1f',primary:'#0066cc'},layout:{mode:'split',align:'left'},notes:'Integration fixture only.'};
+try{
+  child=spawn(process.execPath,['server.mjs'],{cwd:process.cwd(),env:{...process.env,STUDIO_PORT:String(port),STUDIO_VISION_KEY:'',OPENAI_API_KEY:'',STUDIO_VISION_MODEL:''},stdio:['ignore','pipe','pipe'],windowsHide:true});
+  child.stdout.on('data',b=>serverOutput+=b);child.stderr.on('data',b=>serverOutput+=b);
+  let ready=false;for(let i=0;i<100;i++){try{const r=await fetch(base+'/api/status');if(r.ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,100));}assert.ok(ready,serverOutput);
+  const requests=[];
+  fixture=createServer(async(req,res)=>{if(req.url==='/reference'){res.setHeader('Content-Type','text/html; charset=utf-8');return res.end('<!doctype html><title>Reference Capture</title><style>body{margin:0;background:#e7eefb;font-family:Arial;min-height:1400px}h1{font-size:64px;color:#16365b;padding:100px}</style><h1>REAL CAPTURE</h1><p>Public test page, no login cookies.</p>');}let raw='';for await(const b of req)raw+=b;requests.push({url:req.url,body:JSON.parse(raw||'{}'),authorization:req.headers.authorization});if(req.url==='/fail/responses'){res.writeHead(503);return res.end('{}');}res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url.endsWith('/chat/completions')?{choices:[{message:{content:JSON.stringify(visionResult)}}]}:{output:[{content:[{type:'output_text',text:JSON.stringify(visionResult)}]}]}));});
+  await new Promise(r=>fixture.listen(0,'127.0.0.1',r));const mock=`http://127.0.0.1:${fixture.address().port}`;
+  browser=await chromium.launch({executablePath:process.env.STUDIO_BROWSER_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
+  const context=await browser.newContext({viewport:{width:1440,height:1080},acceptDownloads:true}),page=await context.newPage(),errors=[];
+  page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
+  await page.goto(base);await page.waitForSelector('body[data-ready="true"]');
+  await page.screenshot({path:resolve(results,'desktop-overview.png'),fullPage:true});
+  assert.equal(await page.locator('.global-nav').evaluate(e=>getComputedStyle(e).height),'44px');
+  assert.equal(await page.locator('.global-nav').evaluate(e=>getComputedStyle(e).backgroundColor),'rgb(0, 0, 0)');pass('Apple UI loads with local fonts and no runtime errors');
+  const fixtures=await page.evaluate(()=>{
+    const draw=(bg,w=900,h=1100,reference=false)=>{const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d');x.fillStyle=bg;x.fillRect(0,0,w,h);if(reference){x.fillStyle='#1d1d1f';x.font='bold 64px Arial';x.fillText('DESIGN SYSTEM',65,130);x.font='32px Arial';x.fillText('ORIGINAL CONTENT 2026',65,210);}x.fillStyle='#8b9299';x.fillRect(w*.32,h*.35,w*.36,h*.43);x.fillStyle='#222831';x.fillRect(w*.39,h*.4,w*.22,h*.12);x.fillStyle='#fff';x.fillRect(w*.42,h*.59,w*.16,8);return c.toDataURL('image/png');};
+    return {ref:draw('#e7eefb',900,1100,true),other:draw('#f8e3dd',900,1100,true),a:draw('#ffffff',600,800),b:draw('#ffffff',800,500)};
+  });
+  const asFile=(dataUrl,name)=>({name,mimeType:'image/png',buffer:Buffer.from(dataUrl.split(',')[1],'base64')});
+  const awaitIdle=async()=>{await page.waitForFunction(()=>!document.querySelector('#composeBtn').disabled&&!document.querySelector('#analyzeBtn').disabled);};
+  const goto=async view=>{await page.locator(`[data-view="${view}"]`).first().click();};
+  await goto('analyze');await page.locator('#referenceInput').setInputFiles([asFile(fixtures.ref,'reference-blue.png')]);await page.waitForFunction(()=>document.querySelectorAll('.reference-item').length===1);await awaitIdle();
+  await page.locator('#analysisMode').selectOption('pixels');await page.locator('#analyzeBtn').click();await page.waitForFunction(()=>document.querySelector('#mdEditor').value.includes('SHA-256'));await awaitIdle();
+  const md=await page.locator('#mdEditor').inputValue();assert.match(md,/#e7eefb/);assert.match(md,/reference-blue.png/);assert.doesNotMatch(md,/A photography-first interface/);pass('real reference pixels generate source-linked project MD, independent of UI spec');
+  const downloaded=async(selector)=>{const [d]=await Promise.all([page.waitForEvent('download'),page.locator(selector).click()]);const stream=await d.createReadStream(),chunks=[];for await(const chunk of stream)chunks.push(chunk);await awaitIdle();return{buffer:Buffer.concat(chunks),name:d.suggestedFilename()};};
+  const mdDownload=await downloaded('#downloadMdBtn');assert.equal(mdDownload.buffer.toString('utf8'),md);pass('MD download contains the actual generated document');
+  await page.locator('#approveBtn').click();await page.waitForSelector('#composeView:not(.hidden)');await awaitIdle();
+  await page.locator('#assetInput').setInputFiles([asFile(fixtures.a,'product-a.png'),asFile(fixtures.b,'product-b.png')]);await page.waitForFunction(()=>document.querySelectorAll('.asset-tab').length===2);await awaitIdle();
+  const copies=[{title:'纯粹，更出色。',body:'原始产品 · 不重绘\n中文 English 100% & <literal>  双空格',detail:'¥299 / 型号 A'},{title:'A new perspective',body:'Exact copy, original photo.\nNo automatic marketing CTA.',detail:'Model B · 2026'}];
+  for(let i=0;i<2;i++){await page.locator('.asset-tab').nth(i).click();for(const [field,selector]of [['title','#titleInput'],['body','#bodyInput'],['detail','#detailInput']])await page.locator(selector).fill(copies[i][field]);}
+  await page.locator('#composeBtn').click();await page.waitForFunction(()=>document.querySelectorAll('.board-card').length===2);await awaitIdle();
+  await page.screenshot({path:resolve(results,'desktop-compose.png'),fullPage:true});
+  const size=await page.locator('.board-image-button img').first().evaluate(img=>({w:img.naturalWidth,h:img.naturalHeight}));assert.deepEqual(size,{w:1080,h:1350});pass('two actual canvas images generated from distinct originals and exact copy');
+  await goto('export');assert.equal(await page.locator('.validation-item').count(),2);
+  const fj=JSON.parse((await downloaded('#figmaJsonBtn')).buffer);assert.equal(fj.boards.length,2);assert.equal(Object.keys(fj.assets).length,2);
+  for(let i=0;i<2;i++){assert.deepEqual(fj.boards[i].copy,copies[i]);const image=fj.boards[i].nodes.find(n=>n.type==='IMAGE');assert.equal(image.hash,createHash('sha256').update(Buffer.from((i?fixtures.b:fixtures.a).split(',')[1],'base64')).digest('hex'));assert.ok(Math.abs(image.width/image.height-(i?1.6:.75))<.001);assert.ok(fj.boards[i].nodes.some(n=>n.type==='TEXT'&&n.characters===copies[i].body));}
+  pass('Figma JSON contains native layer geometry, exact text, original bytes and matching image hashes');
+  const full=await downloaded('#packageBtn'),zip=await JSZip.loadAsync(full.buffer),entries=Object.keys(zip.files);
+  for(const file of ['DESIGN.md','project.json','design-system.json','figma-import.json','validation-report.json','figma-plugin/manifest.json','figma-plugin/code.js','figma-plugin/ui.html','SOP.md'])assert.ok(zip.file(file),file);
+  const images=entries.filter(n=>n.startsWith('images/')&&n.endsWith('.png'));assert.equal(images.length,2);for(const name of images){const image=await zip.file(name).async('nodebuffer');assert.equal(image.subarray(1,4).toString(),'PNG');assert.equal(image.readUInt32BE(16),1080);assert.equal(image.readUInt32BE(20),1350);}
+  const project=JSON.parse(await zip.file('project.json').async('string'));assert.equal(project.assets.length,2);assert.equal(project.references.length,1);assert.deepEqual(project.assets.map(a=>a.copy),copies);assert.ok(!full.buffer.includes(Buffer.from('test-key-not-real')));pass('full ZIP decodes with real PNG dimensions, original assets, plugin, SOP and project');
+  await page.locator('#exportFormat').selectOption('jpg');const jpg=await JSZip.loadAsync((await downloaded('#imagesZipBtn')).buffer);for(const name of Object.keys(jpg.files).filter(x=>x.endsWith('.jpg'))){const bytes=await jpg.file(name).async('nodebuffer');assert.equal(bytes[0],255);assert.equal(bytes[1],216);}pass('JPG output is genuine JPEG, not renamed PNG');
+  await page.reload();await page.waitForSelector('body[data-ready="true"]');await goto('compose');assert.equal(await page.locator('.board-card').count(),2);await page.locator('.asset-tab').first().click();assert.equal(await page.locator('#bodyInput').inputValue(),copies[0].body);pass('IndexedDB restores originals, copy, approved MD and actual boards after refresh');
+  await page.locator('#projectMenuBtn').click();await page.locator('#projectInput').setInputFiles({name:'backup.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(project))});await page.waitForFunction(()=>document.querySelector('#projectMenuBtn').textContent.includes('恢复'));await awaitIdle();assert.match(await page.locator('#mdStatus').textContent(),/待确认/);await page.locator('#approveBtn').click();await page.waitForSelector('#composeView:not(.hidden)');await awaitIdle();await page.locator('#composeBtn').click();await page.waitForFunction(()=>document.querySelectorAll('.board-card').length===2);await awaitIdle();pass('project JSON restoration verifies originals, requires confirmation, and regenerates boards');
+  await page.locator('#layoutMode').selectOption('split');await page.locator('#backgroundColor').fill('#ffffff');await page.locator('#applyTokensBtn').click();await page.waitForSelector('#analyzeView:not(.hidden)');assert.equal(await page.locator('.board-card').count(),0);assert.match(await page.locator('#mdEditor').inputValue(),/mode: split/);await page.locator('#approveBtn').click();await page.waitForSelector('#composeView:not(.hidden)');await awaitIdle();await page.locator('#composeBtn').click();await page.waitForFunction(()=>document.querySelectorAll('.board-card').length===2);await awaitIdle();pass('editing supported tokens invalidates old boards and visibly regenerates the requested layout');
+  await goto('analyze');await page.locator('#loadAppleBtn').click();await page.waitForFunction(()=>document.querySelector('#mdEditor').value.includes('Apple-design-analysis'));await awaitIdle();assert.match(await page.locator('#mdEditor').inputValue(),/hero-display/);pass('user-provided full Apple MD imports and parses');
+  await page.setViewportSize({width:390,height:844});await page.screenshot({path:resolve(results,'mobile-analyze.png'),fullPage:true});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));pass('mobile workspace does not overflow horizontally');
+  const capture=await post('capture',{url:mock+'/reference',width:1000});assert.equal(capture.status,200,JSON.stringify(capture.data));assert.equal(capture.data.name,'Reference Capture');assert.match(capture.data.dataUrl,/^data:image\/png;base64,/);assert.ok(capture.data.source.styles.some(s=>s.selector==='h1'));pass('web capture takes a genuine isolated-browser screenshot and records CSS evidence');
+  const ocr=await post('ocr',{dataUrl:fixtures.ref});assert.equal(ocr.status,200,JSON.stringify(ocr.data));assert.match(ocr.data.text,/DESIGN|SYSTEM|CONTENT/i);assert.ok(ocr.data.lines.length>0);pass('local OCR recognizes actual image text with local language files');
+  const noModel=await post('vision',{images:[fixtures.ref]});assert.equal(noModel.status,400);assert.match(noModel.data.error,/尚未配置/);pass('missing model fails explicitly without fake analysis');
+  for(const protocol of ['responses','chat']){await post('config',{baseUrl:mock+'/v1',model:'fixture-only',key:'test-key-not-real',protocol});const model=await post('vision',{images:[fixtures.ref]});assert.equal(model.status,200);assert.deepEqual(model.data,visionResult);const req=requests.at(-1);assert.equal(req.body.model,'fixture-only');assert.equal(req.authorization,'Bearer test-key-not-real');assert.ok(protocol==='responses'?req.body.input[0].content.some(x=>x.type==='input_image'):req.body.messages[0].content.some(x=>x.type==='image_url'));}
+  pass('both provider protocol contracts transmit real image payloads (fixture service, not live model)');
+  await post('config',{baseUrl:mock+'/fail',model:'fixture-only',key:'test-key-not-real',protocol:'responses'});const failure=await post('vision',{images:[fixtures.ref]});assert.equal(failure.status,400);assert.match(failure.data.error,/HTTP 503/);pass('provider HTTP failure is reported, never replaced with canned results');
+  assert.equal((await fetch(base+'/.env')).status,404);assert.equal((await fetch(base+'/.git/config')).status,404);assert.equal((await post('config',{model:'x'},{Origin:'https://untrusted.example'})).status,403);assert.ok(!JSON.stringify(await(await fetch(base+'/api/status')).json()).includes('test-key-not-real'));assert.equal(errors.length,0,errors.join('\n'));pass('private files and cross-origin writes are blocked; status and exports contain no key');
+  console.log(`\n${passed.length} browser/integration checks passed. Native Figma host and paid live model remain manual acceptance items.`);
+}catch(error){console.error(error);console.error(serverOutput);process.exitCode=1;}finally{await browser?.close();if(fixture)await new Promise(r=>fixture.close(r));child?.kill();}

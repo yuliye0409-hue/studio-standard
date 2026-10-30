@@ -1,0 +1,15 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import {readFile} from 'node:fs/promises';
+import {composeBoard,parseDesignMd} from '../lib/core.js';
+const code=await readFile(new URL('../figma-plugin/code.js',import.meta.url),'utf8');
+function host(){
+  const nodes=[],messages=[],page={children:[],selection:[]};
+  const create=type=>{const n={type,x:0,y:0,width:100,height:100,children:[],removed:false,pluginData:{},setPluginData(k,v){this.pluginData[k]=v;},resize(w,h){this.width=w;this.height=h;},appendChild(child){if(child.parent){child.parent.children.splice(child.parent.children.indexOf(child),1);}this.children.push(child);child.parent=this;},remove(){this.removed=true;this.children.slice().forEach(x=>x.remove());if(this.parent)this.parent.children.splice(this.parent.children.indexOf(this),1);}};n.parent=page;page.children.push(n);nodes.push(n);return n;};
+  const figma={showUI(){},ui:{postMessage:x=>messages.push(x)},currentPage:page,viewport:{scrollAndZoomIntoView(){}},notify(){},listAvailableFontsAsync:async()=>[{fontName:{family:'Inter',style:'Regular'}},{fontName:{family:'Inter',style:'Semi Bold'}}],loadFontAsync:async()=>{},createImage:bytes=>({hash:'image-'+bytes.length}),createFrame:()=>create('FRAME'),createRectangle:()=>create('RECTANGLE'),createText:()=>create('TEXT')};vm.runInNewContext(code,{figma,__html__:'',Uint8Array,Map,Set});return{figma,nodes,messages};
+}
+function data(){const tokens=parseDesignMd('---\nname: test\n---\n').tokens;const b=composeBoard({asset:{id:'a',width:600,height:800,hash:'original',name:'product'},copy:{title:'Title',body:'Literal body',detail:''},tokens,width:1080,height:1350,measure:(s,t)=>s.length*t.size*.6,fonts:{title:'Inter',body:'Inter'},id:'b'});return{schema:'studio-standard/2',tokens,boards:[b],assets:{a:{bytes:[1,2,3]}}};}
+test('import creates independent editable native text and image nodes',async()=>{const h=host(),d=data();await h.figma.ui.onmessage({type:'import',data:d});assert.equal(h.messages[0].ok,true);assert.equal(h.figma.currentPage.children.length,1);const f=h.figma.currentPage.children[0];assert.equal(f.children.length,4);assert.deepEqual(f.children.filter(n=>n.type==='TEXT').map(n=>n.characters),['Title','Literal body']);const image=f.children.at(-1);assert.equal(image.fills[0].scaleMode,'FIT');assert.equal(image.pluginData.sourceSHA256,'original');assert.equal(h.messages[0].textCount,2);});
+test('validation failure does not create any frames',async()=>{const h=host(),d=data();d.boards[0].nodes.at(-1).x=-100;await h.figma.ui.onmessage({type:'import',data:d});assert.equal(h.messages[0].ok,false);assert.equal(h.nodes.length,0);});
+test('mid-import error removes all newly created nodes, not existing work',async()=>{const h=host(),d=data(),existing=h.figma.createFrame();d.boards[0].nodes[1].color='invalid';await h.figma.ui.onmessage({type:'import',data:d});assert.equal(h.messages[0].ok,false);assert.equal(h.figma.currentPage.children.length,1);assert.equal(h.figma.currentPage.children[0],existing);assert.ok(h.nodes.filter(n=>n!==existing).every(n=>n.removed));});

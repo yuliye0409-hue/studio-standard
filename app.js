@@ -1,0 +1,264 @@
+import { stringify } from 'yaml';
+import { SCHEMA, uid, safeName, parseDesignMd, buildAnalysisMd, composeBoard, validateBoard } from './lib/core.js';
+import { readFiles, makeAsset, analyzeAsset, resolveFonts, textMeasurer, renderBoard, figmaImage, sha256 } from './lib/media.js';
+import { saveProject, listProjects } from './lib/storage.js';
+
+const $ = selector => document.querySelector(selector);
+const $$ = selector => [...document.querySelectorAll(selector)];
+const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
+const fresh = () => ({ schema: SCHEMA, id: uid(), name: '我的设计项目', updatedAt: new Date().toISOString(), references: [], assets: [], md: '', approvedMd: '', history: [], boards: [], reports: [], canvas: { width: 1080, height: 1350 } });
+let project, selectedAsset = null, currentView = 'overview', previews = new Map(), saveTimer, busy = false;
+let serverStatus = null;
+function toast(text, error = false) { const node = $('#toast'); node.textContent = text; node.classList.add('show'); node.dataset.error = error; clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.remove('show'), error ? 9000 : 3500); }
+function fail(error) { console.error(error instanceof Error ? error.message : error); toast(error.message || String(error), true); }
+async function task(button, fn) {
+  if (busy) return toast('当前任务尚未结束，请稍候。');
+  busy = true; const label = button?.textContent;
+  if (button) { button.disabled = true; button.textContent = '正在处理…'; }
+  try { await fn(); } catch (error) { fail(error); } finally { busy = false; if (button) { button.disabled = false; button.textContent = label; } }
+}
+function go(view) {
+  currentView = ['overview', 'analyze', 'compose', 'export', 'sop'].includes(view) ? view : 'overview';
+  $$('.view').forEach(n => n.classList.toggle('hidden', n.id !== currentView + 'View'));
+  if (currentView === 'export') renderReport();
+  window.scrollTo({ top: 0, behavior: 'instant' });
+}
+async function persist() {
+  clearTimeout(saveTimer); project.updatedAt = new Date().toISOString(); $('#saveStatus').textContent = '正在保存';
+  try { await saveProject(project); $('#saveStatus').textContent = '已保存至本机'; } catch { $('#saveStatus').textContent = '保存失败，请备份'; throw new Error('本地存储失败（可能空间不足）。请立即备份项目 JSON。'); }
+}
+function changed() { $('#saveStatus').textContent = '有未保存更改'; clearTimeout(saveTimer); saveTimer = setTimeout(() => persist().catch(fail), 500); }
+function invalidate(reason) { project.boards = []; project.reports = []; previews.clear(); renderBoards(); $('#composeStatus').textContent = reason || ''; }
+function progress(message) { $('#analysisProgress').classList.remove('hidden'); $('#analysisProgress').textContent = message; }
+function approved() { return !!project.md && project.md === project.approvedMd; }
+function renderGate() { $('#composeGate').textContent = approved() ? '规范已确认。原图完整显示；标题、正文、补充信息逐字保留。' : '请先生成或导入 DESIGN.md，并确认规范。'; $('#composeGate').classList.toggle('ok', approved()); }
+function renderSpec() {
+  $('#mdEditor').value = project.md;
+  $('#mdStatus').textContent = project.md ? (approved() ? '已确认 · 可用于排版' : '待确认 · 修改参数后请重新确认') : '尚未生成或导入规范';
+  const container = $('#tokenPreview'); container.replaceChildren();
+  try {
+    if (project.md) {
+      const { tokens, warnings } = parseDesignMd(project.md);
+      for (const [key, color] of Object.entries(tokens.colors)) { if (key === 'muted') continue; const chip = el('span', 'token-chip'); const dot = el('i'); dot.style.background = color; chip.append(dot, el('span', '', key + ' ' + color)); container.append(chip); }
+      $('#layoutMode').value = tokens.layout.mode; $('#backgroundColor').value = tokens.colors.background; $('#foregroundColor').value = tokens.colors.foreground;
+      $('#specWarnings').textContent = warnings.join(' ') || '修改后的 MD 会真实影响配色、字体、间距和布局。';
+    } else $('#specWarnings').textContent = '规范修改后需要重新确认；旧排版会失效。';
+  } catch (error) { $('#specWarnings').textContent = error.message; }
+  renderHistory(); renderGate();
+}
+function renderHistory() {
+  const list = $('#historyList'); list.replaceChildren();
+  if (!project.history.length) list.append(el('p', '', '确认规范后，在本机保留最近 10 个版本。'));
+  project.history.forEach((entry, index) => { const row = el('div', 'history-item'); const button = el('button', 'text-link', '恢复此版本'); button.onclick = () => { project.md = entry.md; project.approvedMd = ''; invalidate('已恢复规范，请重新确认。'); renderSpec(); changed(); }; row.append(el('span', '', `版本 ${entry.version} · ${new Date(entry.date).toLocaleString()}`), button); list.append(row); });
+}
+function setMd(md) { project.md = md; project.approvedMd = ''; invalidate('规范已改变，需要重新生成作品。'); renderSpec(); changed(); }
+function renderReferences() {
+  $('#referenceCount').textContent = `${project.references.length} 张`;
+  const list = $('#referenceList'); list.replaceChildren();
+  for (const ref of project.references) {
+    const row = el('div', 'reference-item'), image = el('img'); image.src = ref.dataUrl; image.alt = ref.name;
+    const desc = el('div'); desc.append(el('strong', '', ref.name), el('small', '', `${ref.width} × ${ref.height}${ref.analysis ? ' · 已测量' : ''}${ref.ocr ? ' · 已 OCR' : ''}`));
+    const remove = el('button', '', '×'); remove.title = '移除参考图'; remove.onclick = async () => { if (busy) return; project.references = project.references.filter(r => r.id !== ref.id); project.approvedMd = ''; renderReferences(); renderGate(); changed(); toast('参考集已变化，请重新分析或重新确认现有规范。'); };
+    row.append(image, desc, remove); list.append(row);
+  }
+}
+async function uploadReferences(files) {
+  if (!files.length) return;
+  const added = await readFiles(files, 'reference', progress);
+  if (added.length + project.references.length > 20) throw new Error('每个项目最多 20 张参考画面（含 PDF 页面），请拆分项目。');
+  project.references.push(...added); project.approvedMd = ''; renderReferences(); renderGate(); await persist(); progress(`已读取 ${added.length} 张画面，可开始分析。`);
+}
+async function api(path, data) {
+  const response = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  let result; try { result = await response.json(); } catch { throw new Error('本机服务返回无效响应，请确认 v0.2 服务正在运行。'); }
+  if (!response.ok) throw new Error(result.error || '请求失败。');
+  return result;
+}
+async function scaledReference(ref, maximum = 2000) {
+  const { loadImage } = await import('./lib/media.js'); const image = await loadImage(ref.dataUrl); const factor = Math.min(1, maximum / Math.max(image.width, image.height));
+  const canvas = document.createElement('canvas'); canvas.width = Math.max(1, Math.round(image.width * factor)); canvas.height = Math.max(1, Math.round(image.height * factor));
+  const ctx = canvas.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height };
+}
+async function analyze() {
+  if (!project.references.length) throw new Error('请先上传参考设计或捕获网页。');
+  const mode = $('#analysisMode').value;
+  if (mode === 'vision') {
+    await refreshStatus(); if (!serverStatus?.vision?.configured) { $('#settingsDialog').showModal(); throw new Error('请先配置支持图片输入的视觉模型。没有使用示例结果。'); }
+    if (!confirm(`将向 ${serverStatus.vision.baseUrl} 发送本项目的 ${project.references.length} 张参考图用于分析，可能产生服务商费用。是否继续？`)) return;
+  }
+  const measured = [];
+  for (const [index, reference] of project.references.entries()) {
+    progress(`测量参考 ${index + 1}/${project.references.length}：${reference.name}`);
+    const ref = await analyzeAsset(reference);
+    if (mode === 'local') {
+      progress(`本地 OCR ${index + 1}/${project.references.length}：${reference.name}（中英文识别）`);
+      const image = await scaledReference(ref);
+      const ocr = await api('ocr', { dataUrl: image.dataUrl });
+      ocr.lines = ocr.lines.map(line => ({ ...line, relativeHeight: (line.bbox.y1 - line.bbox.y0) / image.height, centerX: (line.bbox.x0 + line.bbox.x1) / 2 / image.width }));
+      ref.ocr = ocr;
+    }
+    measured.push(ref);
+  }
+  let visual = null;
+  if (mode === 'vision') { progress('视觉模型正在解读构图、字体层级、组件与品牌语气…'); const images = []; for (const ref of measured) images.push((await scaledReference(ref, 1800)).dataUrl); visual = await api('vision', { images }); }
+  project.references = measured;
+  setMd(buildAnalysisMd(measured, project.name, mode, visual));
+  parseDesignMd(project.md);
+  await persist(); renderReferences(); progress('已根据真实参考生成规范。请检查推测项，确认后进入排版。');
+  toast('设计规范已生成，不含固定示例分析。');
+}
+function currentAsset() { return project.assets.find(a => a.id === selectedAsset); }
+function renderAssets() {
+  if (!project.assets.some(a => a.id === selectedAsset)) selectedAsset = project.assets[0]?.id || null;
+  const tabs = $('#assetTabs'); tabs.replaceChildren();
+  for (const [index, asset] of project.assets.entries()) {
+    const button = el('button', 'asset-tab' + (asset.id === selectedAsset ? ' active' : '')); const image = el('img'); image.src = asset.dataUrl; image.alt = ''; button.append(image, el('span', '', `${index + 1}. ${asset.name}`));
+    button.onclick = () => { selectedAsset = asset.id; renderAssets(); }; tabs.append(button);
+  }
+  const asset = currentAsset(); $('#copyForm').classList.toggle('hidden', !asset); $('#assetEmpty').classList.toggle('hidden', !!asset);
+  if (asset) { $('#titleInput').value = asset.copy.title; $('#bodyInput').value = asset.copy.body; $('#detailInput').value = asset.copy.detail; $('#assetMeta').textContent = `${asset.width} × ${asset.height}px · SHA-256 ${asset.hash.slice(0, 14)}… · 原图完整保留`; }
+}
+function updateCopy() { const asset = currentAsset(); if (!asset) return; asset.copy = { title: $('#titleInput').value, body: $('#bodyInput').value, detail: $('#detailInput').value }; invalidate('文案已修改，请重新生成。'); changed(); }
+async function compose() {
+  if (!approved()) { go('analyze'); throw new Error('请先确认规范。'); }
+  if (!project.assets.length) throw new Error('请添加未排版的商品图片和文案。');
+  const { tokens } = parseDesignMd(project.md), measure = textMeasurer();
+  const boards = [], reports = [], pendingPreviews = new Map();
+  await document.fonts.load('600 40px Inter'); await document.fonts.load('400 24px Inter');
+  for (const [index, asset] of project.assets.entries()) {
+    $('#composeStatus').textContent = `正在排版 ${index + 1}/${project.assets.length}：${asset.name}`;
+    const fonts = await resolveFonts(tokens, Object.values(asset.copy).join(''));
+    const board = composeBoard({ asset, copy: asset.copy, tokens, ...project.canvas, measure, fonts, id: uid() });
+    board.mdHash = await sha256('data:text/plain;base64,' + btoa(unescape(encodeURIComponent(project.md))));
+    for (const role of ['title', 'body']) if (!tokens.typography[role].family.split(',').map(s => s.replace(/['"]/g, '').trim()).includes(fonts[role])) board.warnings.push(`字体替换：${tokens.typography[role].family} → ${fonts[role]}。`);
+    const report = validateBoard(board, asset); if (!report.ok) throw new Error(report.errors.join('\n'));
+    const rendered = await renderBoard(board, project.assets); pendingPreviews.set(board.id, rendered.dataUrl); boards.push(board); reports.push(report);
+  }
+  project.boards = boards; project.reports = reports; previews = pendingPreviews; renderBoards(); renderReport(); await persist();
+  $('#composeStatus').textContent = `完成 ${boards.length} 张真实画板。所有原图与文案均已逐项核对。`; toast('排版完成，可查看和导出真实图片。');
+}
+function renderBoards() {
+  const grid = $('#boardGrid'); grid.replaceChildren(); $('#boardCount').textContent = project.boards.length ? `${project.boards.length} 张 · ${project.canvas.width} × ${project.canvas.height}px` : '尚未生成';
+  if (!project.boards.length) { const empty = el('div', 'empty-board'); empty.append(el('span', '', '▧'), el('h3', '', '这里，只展示你的真实作品。'), el('p', '', '确认规范并上传素材后，生成可下载的画板。')); grid.append(empty); return; }
+  project.boards.forEach((board, index) => {
+    const card = el('article', 'board-card'), button = el('button', 'board-image-button'), image = el('img'); image.src = previews.get(board.id) || ''; image.alt = board.copy.title; button.append(image);
+    button.onclick = () => { $('#largePreview').src = previews.get(board.id); $('#imageDialog').showModal(); };
+    const caption = el('div', 'board-caption'), download = el('button', 'text-link', 'PNG ↓'); download.onclick = () => task(download, async () => { ensureExportable(); const result = await renderBoard(board, project.assets); downloadBlob(result.blob, `${String(index + 1).padStart(2, '0')}-${safeName(board.name)}.png`); });
+    caption.append(el('strong', '', board.copy.title), download); card.append(button, caption);
+    if (board.warnings.length) card.append(el('p', 'board-warning', board.warnings.join(' '))); grid.append(card);
+  });
+}
+function renderReport() {
+  const list = $('#validationReport'); list.replaceChildren();
+  if (!project.boards.length) { list.append(el('p', 'muted', '生成排版后显示真实检查结果，不预设通过。')); return; }
+  project.reports = project.boards.map(b => validateBoard(b, project.assets.find(a => a.id === b.assetId)));
+  project.reports.forEach((report, index) => { const row = el('div', 'validation-item'); row.append(el('strong', '', `${report.ok ? '✓' : '×'} ${project.boards[index].name}`), el('p', '', report.ok ? report.checks.join(' · ') : report.errors.join('\n'))); if (report.warnings.length) row.append(el('p', '', '需人工查看：' + report.warnings.join('\n'))); list.append(row); });
+}
+function downloadBlob(blob, name) { const url = URL.createObjectURL(blob), anchor = el('a'); anchor.href = url; anchor.download = name; document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 10000); }
+function downloadText(text, name, type = 'text/plain;charset=utf-8') { downloadBlob(new Blob([text], { type }), name); }
+function ensureExportable() {
+  if (!approved() || !project.boards.length) throw new Error('请先确认规范并生成真实作品。');
+  for (const board of project.boards) {
+    const asset = project.assets.find(a => a.id === board.assetId); if (!asset) throw new Error('缺少商品素材。');
+    const report = validateBoard(board, asset); if (!report.ok) throw new Error(report.errors.join('\n'));
+  }
+}
+async function figmaPackage() {
+  ensureExportable(); const assets = {};
+  for (const asset of project.assets) assets[asset.id] = { id: asset.id, name: asset.name, hash: asset.hash, originalDataUrl: asset.dataUrl, ...await figmaImage(asset) };
+  return { schema: SCHEMA, project: project.name, createdAt: new Date().toISOString(), designMd: project.md, tokens: parseDesignMd(project.md).tokens, boards: project.boards, assets, reports: project.reports };
+}
+async function addPlugin(zip, prefix = '') {
+  for (const name of ['manifest.json', 'code.js', 'ui.html', 'README.md']) { const response = await fetch('/figma-plugin/' + name); if (!response.ok) throw new Error('缺少 Figma 插件文件 ' + name); zip.file(prefix + name, await response.text()); }
+}
+async function exportZip(kind) {
+  ensureExportable(); const zip = new JSZip(), jpg = $('#exportFormat').value === 'jpg';
+  for (const [index, board] of project.boards.entries()) { $('#exportStatus').textContent = `正在导出图片 ${index + 1}/${project.boards.length}`; const result = await renderBoard(board, project.assets, jpg ? 'image/jpeg' : 'image/png'); zip.file(`images/${String(index + 1).padStart(2, '0')}-${safeName(board.name)}.${jpg ? 'jpg' : 'png'}`, result.blob); }
+  if (kind === 'full') {
+    zip.file('DESIGN.md', project.md); zip.file('design-system.json', JSON.stringify(parseDesignMd(project.md).tokens, null, 2)); zip.file('project.json', JSON.stringify(project));
+    zip.file('figma-import.json', JSON.stringify(await figmaPackage())); zip.file('validation-report.json', JSON.stringify(project.reports, null, 2));
+    for (const [index, asset] of project.assets.entries()) { const extension = asset.dataUrl.startsWith('data:image/jpeg') ? 'jpg' : asset.dataUrl.startsWith('data:image/webp') ? 'webp' : 'png'; zip.file(`assets/${index + 1}-${safeName(asset.name)}.${extension}`, asset.dataUrl.split(',')[1], { base64: true }); }
+    await addPlugin(zip, 'figma-plugin/'); zip.file('SOP.md', await (await fetch('/SOP.md')).text());
+  }
+  $('#exportStatus').textContent = '正在打包 ZIP…'; downloadBlob(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }), safeName(project.name) + (kind === 'full' ? '-完整交付包.zip' : '-图片.zip')); $('#exportStatus').textContent = '导出完成。已打包实际图片与文件，不是多次模拟下载。';
+}
+async function refreshStatus() {
+  const res = await fetch('/api/status'); if (!res.ok) throw new Error('本机服务不可用。'); serverStatus = await res.json();
+  if (serverStatus.version !== '0.2.0') throw new Error('当前端口不是 v0.2 服务，请按 README 重启。');
+  $('#connectionDot').textContent = serverStatus.vision.configured ? '●' : '○'; $('#apiBase').value = serverStatus.vision.baseUrl; $('#apiModel').value = serverStatus.vision.model; $('#apiProtocol').value = serverStatus.vision.protocol;
+}
+async function showProjects() {
+  await persist(); $('#projectNameInput').value = project.name; const list = $('#projectList'); list.replaceChildren();
+  for (const item of await listProjects()) { const button = el('button', 'project-choice'); button.append(el('span', '', item.name + (item.id === project.id ? ' · 当前' : '')), el('small', '', `${item.assets.length} 个素材`)); button.onclick = async () => { if (busy) return; await persist(); await useProject(item); $('#projectDialog').close(); }; list.append(button); }
+  $('#projectDialog').showModal();
+}
+async function useProject(value) {
+  project = value; selectedAsset = null; previews.clear();
+  $('#projectMenuBtn').replaceChildren(document.createTextNode(project.name + ' '), el('span', '', '⌄'));
+  $('#canvasWidth').value = project.canvas.width; $('#canvasHeight').value = project.canvas.height;
+  renderReferences(); renderAssets(); renderSpec();
+  for (const board of project.boards) { try { const result = await renderBoard(board, project.assets); previews.set(board.id, result.dataUrl); } catch { invalidate('历史素材缺失，请重新生成。'); break; } }
+  renderBoards(); renderReport(); await persist();
+}
+async function restore(file) {
+  if (!file) return; if (file.size > 150 * 1024 * 1024) throw new Error('项目备份超过 150MB。');
+  let imported; try { imported = JSON.parse(await file.text()); } catch { throw new Error('备份不是有效 JSON。'); }
+  if (imported.schema !== SCHEMA || !Array.isArray(imported.references) || !Array.isArray(imported.assets) || imported.references.length > 20 || imported.assets.length > 30) throw new Error('备份不是 Studio Standard v0.2 的完整项目文件。旧版演示 JSON 无法还原素材。');
+  for (const asset of [...imported.references, ...imported.assets]) {
+    if (!/^data:image\/(png|jpeg|webp);base64,/.test(asset.dataUrl || '')) throw new Error('项目缺少有效原始图片。');
+    if (await sha256(asset.dataUrl) !== asset.hash) throw new Error('备份素材校验不匹配。');
+  }
+  const restored = { ...fresh(), id: uid(), name: String(imported.name || '恢复的项目') + ' · 恢复', references: imported.references, assets: imported.assets, md: String(imported.md || ''), canvas: imported.canvas || { width: 1080, height: 1350 }, approvedMd: '', boards: [], reports: [], history: [] };
+  if (restored.md) parseDesignMd(restored.md);
+  await useProject(restored); $('#projectDialog').close(); go('analyze'); toast('素材与文案已恢复，请重新确认规范后生成。');
+}
+async function loadSop() {
+  const text = await (await fetch('/SOP.md')).text(), container = $('#sopContent'); container.replaceChildren();
+  for (const block of text.split(/\n\n+/)) { if (!block.trim()) continue; if (block.startsWith('# ')) continue; const tag = block.startsWith('## ') ? 'h2' : block.startsWith('### ') ? 'h3' : 'p'; const node = el(tag, '', block.replace(/^#{2,3} /, '').replace(/`/g, '')); node.style.whiteSpace = 'pre-wrap'; container.append(node); }
+}
+
+function wire() {
+  $$('[data-view]').forEach(n => n.onclick = e => { e.preventDefault(); go(n.dataset.view); });
+  $('#referenceInput').onchange = e => task($('#analyzeBtn'), async () => { await uploadReferences([...e.target.files]); e.target.value = ''; });
+  for (const type of ['dragenter', 'dragover']) $('#referenceDropzone').addEventListener(type, e => { e.preventDefault(); $('#referenceDropzone').classList.add('dragging'); });
+  for (const type of ['dragleave', 'drop']) $('#referenceDropzone').addEventListener(type, e => { e.preventDefault(); $('#referenceDropzone').classList.remove('dragging'); if (type === 'drop') task($('#analyzeBtn'), () => uploadReferences([...e.dataTransfer.files])); });
+  $('#captureBtn').onclick = () => task($('#captureBtn'), async () => { if (!$('#webUrl').value) throw new Error('请输入网页地址。'); if (project.references.length >= 20) throw new Error('参考画面已达 20 张上限。'); progress('本机浏览器正在捕获网页…'); const capture = await api('capture', { url: $('#webUrl').value }); const asset = await makeAsset(capture.dataUrl, capture.name, { source: capture.source }); project.references.push(asset); project.approvedMd = ''; renderReferences(); renderGate(); await persist(); progress(capture.source.clipped ? '网页超过 16000px，仅捕获前 16000px；完整高度见来源信息。' : '网页已捕获，可开始分析。'); });
+  $('#analyzeBtn').onclick = () => task($('#analyzeBtn'), analyze);
+  $('#mdInput').onchange = e => task(null, async () => { const file = e.target.files[0]; if (!file) return; if (file.size > 2 * 1024 * 1024) throw new Error('MD 文件超过 2MB。'); const md = await file.text(); parseDesignMd(md); setMd(md); e.target.value = ''; await persist(); });
+  $('#loadAppleBtn').onclick = () => task($('#loadAppleBtn'), async () => { const md = await (await fetch('/UI-DESIGN.md')).text(); parseDesignMd(md); setMd(md); await persist(); toast('已载入你提供的 Apple 规范；确认后才会用于新作品。'); });
+  $('#mdEditor').oninput = () => { project.md = $('#mdEditor').value; project.approvedMd = ''; invalidate('规范已变化，请重新确认。'); renderGate(); $('#mdStatus').textContent = '已修改 · 待确认'; changed(); };
+  $('#mdEditor').onblur = renderSpec;
+  $('#approveBtn').onclick = () => task($('#approveBtn'), async () => { parseDesignMd(project.md); project.approvedMd = project.md; const last = project.history.at(-1); if (!last || last.md !== project.md) project.history.push({ version: (last?.version || 0) + 1, date: new Date().toISOString(), md: project.md }); project.history = project.history.slice(-10); renderSpec(); await persist(); go('compose'); });
+  $('#downloadMdBtn').onclick = () => { try { parseDesignMd(project.md); downloadText(project.md, 'DESIGN.md'); } catch (e) { fail(e); } };
+  $('#assetInput').onchange = e => task($('#composeBtn'), async () => { const added = await readFiles([...e.target.files], 'asset'); if (project.assets.length + added.length > 30) throw new Error('每个项目最多 30 张素材，请拆分项目。'); added.forEach(a => { a.copy = { title: '', body: '', detail: '' }; }); project.assets.push(...added); selectedAsset = added[0]?.id || selectedAsset; invalidate('素材已变更，请填写文案并重新生成。'); renderAssets(); await persist(); e.target.value = ''; });
+  for (const id of ['titleInput', 'bodyInput', 'detailInput']) $('#' + id).oninput = updateCopy;
+  $('#removeAssetBtn').onclick = () => { if (!currentAsset()) return; if (!confirm('移除当前素材及其文案？已备份的项目不受影响。')) return; project.assets = project.assets.filter(a => a.id !== selectedAsset); invalidate('素材已移除，请重新生成。'); renderAssets(); changed(); };
+  const reorder = offset => { const index = project.assets.findIndex(a => a.id === selectedAsset), target = index + offset; if (index < 0 || target < 0 || target >= project.assets.length) return; [project.assets[index], project.assets[target]] = [project.assets[target], project.assets[index]]; invalidate('素材顺序已修改，请重新生成。'); renderAssets(); changed(); };
+  $('#assetUpBtn').onclick = () => reorder(-1); $('#assetDownBtn').onclick = () => reorder(1);
+  for (const id of ['canvasWidth', 'canvasHeight']) $('#' + id).onchange = () => { project.canvas = { width: Number($('#canvasWidth').value), height: Number($('#canvasHeight').value) }; invalidate('画布尺寸已改变，请重新生成。'); changed(); };
+  $('#sizePreset').onchange = e => { const [width, height] = e.target.value.split('x').map(Number); project.canvas = { width, height }; $('#canvasWidth').value = width; $('#canvasHeight').value = height; invalidate('画布尺寸已改变，请重新生成。'); changed(); };
+  $('#applyTokensBtn').onclick = () => { try { const { document, prose } = parseDesignMd(project.md); document.colors = { ...document.colors, canvas: $('#backgroundColor').value, ink: $('#foregroundColor').value }; document.layout = { ...document.layout, mode: $('#layoutMode').value }; setMd('---\n' + stringify(document, { lineWidth: 0 }) + '---\n\n' + prose); go('analyze'); toast('参数已写回 MD，请重新确认。'); } catch (e) { fail(e); } };
+  $('#composeBtn').onclick = () => task($('#composeBtn'), compose);
+  $('#imagesZipBtn').onclick = () => task($('#imagesZipBtn'), () => exportZip('images'));
+  $('#packageBtn').onclick = () => task($('#packageBtn'), () => exportZip('full'));
+  $('#figmaJsonBtn').onclick = () => task($('#figmaJsonBtn'), async () => downloadText(JSON.stringify(await figmaPackage()), 'figma-import.json', 'application/json'));
+  $('#pluginZipBtn').onclick = () => task($('#pluginZipBtn'), async () => { const zip = new JSZip(); await addPlugin(zip); downloadBlob(await zip.generateAsync({ type: 'blob' }), 'Studio-Standard-Figma-Importer.zip'); });
+  $('#exportProjectBtn').onclick = () => task($('#exportProjectBtn'), async () => { await persist(); downloadText(JSON.stringify(project), safeName(project.name) + '-project.json', 'application/json'); });
+  $('#saveBtn').onclick = () => persist().then(() => toast('项目已保存至本机浏览器。')).catch(fail);
+  $('#projectMenuBtn').onclick = () => showProjects().catch(fail);
+  $('#renameProjectBtn').onclick = () => task($('#renameProjectBtn'), async () => { const name = $('#projectNameInput').value.trim(); if (!name) throw new Error('项目名称不能为空。'); project.name = name; $('#projectMenuBtn').replaceChildren(document.createTextNode(name + ' '), el('span', '', '⌄')); await persist(); toast('项目已重命名。'); });
+  $('#newProjectBtn').onclick = () => task($('#newProjectBtn'), async () => { await persist(); await useProject(fresh()); $('#projectDialog').close(); go('analyze'); });
+  $('#projectInput').onchange = e => task(null, async () => { await restore(e.target.files[0]); e.target.value = ''; });
+  const settings = () => { $('#settingsDialog').showModal(); refreshStatus().catch(fail); };
+  $('#settingsBtn').onclick = settings; $('#footerSettingsBtn').onclick = settings;
+  $('#saveSettingsBtn').onclick = () => task($('#saveSettingsBtn'), async () => { const result = await api('config', { baseUrl: $('#apiBase').value, model: $('#apiModel').value, protocol: $('#apiProtocol').value, key: $('#apiKey').value }); $('#apiKey').value = ''; await refreshStatus(); $('#settingsStatus').textContent = result.configured ? '接口已配置（尚未发送图片验证）；分析前会明确征求发送确认。' : '还缺少 API Key。'; });
+  window.addEventListener('pagehide', () => { if (project) saveProject(project).catch(() => {}); });
+}
+
+async function start() {
+  wire(); const projects = await listProjects(); await useProject(projects[0] || fresh());
+  await refreshStatus(); await loadSop();
+  document.body.dataset.ready = 'true';
+}
+start().catch(error => { $('#saveStatus').textContent = '启动异常'; fail(error); });
