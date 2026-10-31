@@ -1,14 +1,30 @@
 import { stringify } from 'yaml';
-import { SCHEMA, uid, safeName, parseDesignMd, buildAnalysisMd, composeBoard, validateBoard } from './lib/core.js';
-import { readFiles, makeAsset, analyzeAsset, resolveFonts, textMeasurer, renderBoard, figmaImage, sha256 } from './lib/media.js';
+import { SCHEMA, uid, safeName, parseDesignMd, buildAnalysisMd, buildDesignSystem, extractLayoutEvidence, composeBoard, validateBoard } from './lib/core.js';
+import { readFiles, readDataUrl, makeAsset, analyzeAsset, resolveFonts, textMeasurer, renderBoard, figmaImage, sha256 } from './lib/media.js';
 import { saveProject, listProjects } from './lib/storage.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
-const fresh = () => ({ schema: SCHEMA, id: uid(), name: '我的设计项目', updatedAt: new Date().toISOString(), references: [], assets: [], md: '', approvedMd: '', history: [], boards: [], reports: [], canvas: { width: 1080, height: 1350 } });
+const fresh = () => ({ schema: SCHEMA, id: uid(), name: '我的设计项目', updatedAt: new Date().toISOString(), references: [], assets: [], brand: { logo: null, fonts: [] }, md: '', approvedMd: '', history: [], boards: [], reports: [], visualAnalysis: null, canvas: { width: 1080, height: 1350 } });
 let project, selectedAsset = null, currentView = 'overview', previews = new Map(), saveTimer, busy = false;
 let serverStatus = null;
+function boardAssets() { return project.brand?.logo ? [...project.assets, project.brand.logo] : project.assets; }
+async function loadBrandFonts() {
+  if (!project.brand?.fonts?.length) return;
+  let style = document.querySelector('#brand-fonts'); if (!style) { style = el('style'); style.id = 'brand-fonts'; document.head.append(style); }
+  style.textContent = project.brand.fonts.map(font => `@font-face{font-family:"${font.family.replace(/[^\w -]/g, '')}";src:url(${font.dataUrl}) format("${font.format || 'truetype'}");font-weight:100 900;font-style:normal;font-display:block}`).join('\n');
+  const loaded = await Promise.all(project.brand.fonts.map(font => document.fonts.load(`400 24px "${font.family}"`)));
+  if (loaded.some(result => !result.length)) throw new Error('品牌字体无法在浏览器加载，请确认文件格式与字体家族名。');
+}
+function renderBrand() {
+  const logo = $('#brandLogoPreview'), fontList = $('#brandFontList'); if (!logo || !fontList) return;
+  logo.replaceChildren(); fontList.replaceChildren();
+  if (project.brand?.logo) { const image = el('img'); image.src = project.brand.logo.dataUrl; image.alt = '品牌 Logo'; logo.append(image, el('span', 'fine-print', `${project.brand.logo.name} · 原图保留`)); }
+  else logo.append(el('span', 'fine-print', '尚未上传品牌 Logo。'));
+  if (!project.brand?.fonts?.length) fontList.append(el('span', 'fine-print', '尚未上传品牌字体。'));
+  else project.brand.fonts.forEach((font, index) => { const row = el('div', 'brand-font-row'); row.append(el('span', '', `${font.family} · ${font.name}`)); const remove = el('button', 'text-link', '移除'); remove.onclick = () => { project.brand.fonts.splice(index, 1); loadBrandFonts().then(() => { renderBrand(); invalidate('品牌字体已改变，请重新确认规范并生成。'); changed(); }); }; row.append(remove); fontList.append(row); });
+}
 function toast(text, error = false) { const node = $('#toast'); node.textContent = text; node.classList.add('show'); node.dataset.error = error; clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.remove('show'), error ? 9000 : 3500); }
 function fail(error) { console.error(error instanceof Error ? error.message : error); toast(error.message || String(error), true); }
 async function task(button, fn) {
@@ -44,7 +60,21 @@ function renderSpec() {
       $('#specWarnings').textContent = warnings.join(' ') || '修改后的 MD 会真实影响配色、字体、间距和布局。';
     } else $('#specWarnings').textContent = '规范修改后需要重新确认；旧排版会失效。';
   } catch (error) { $('#specWarnings').textContent = error.message; }
+  renderEvidence();
+  renderBrand();
   renderHistory(); renderGate();
+}
+function renderEvidence() {
+  const container = $('#evidenceList'); if (!container) return; container.replaceChildren();
+  const roles = [['headline','标题'],['body','正文'],['price','价格/规格'],['product','商品候选'],['decorative','装饰'],['unknown','待确认']];
+  const refs = project.references.filter(r => r.evidence?.elements?.length);
+  if (!refs.length) { container.append(el('p', 'fine-print', '分析后这里会显示带坐标、来源和置信度的结构证据。')); return; }
+  refs.forEach(ref => { const section = el('div', 'evidence-reference'); section.append(el('strong', '', ref.name)); for (const [index, item] of ref.evidence.elements.entries()) {
+    const row = el('div', 'evidence-row'), meta = el('span', '', `${item.id} · ${item.source} · ${Math.round(item.bbox.confidence * 100)}%`), select = document.createElement('select');
+    roles.forEach(([value, label]) => { const option = el('option', '', label); option.value = value; option.selected = item.role === value; select.append(option); });
+    select.onchange = () => { item.role = select.value; project.md = buildAnalysisMd(project.references, project.name, project.analysisMode || 'local', project.visualAnalysis); project.approvedMd = ''; invalidate('证据角色已调整，请重新确认规范。'); renderSpec(); changed(); };
+    row.append(meta, select); if (item.text) row.title = item.text; section.append(row);
+  } container.append(section); });
 }
 function renderHistory() {
   const list = $('#historyList'); list.replaceChildren();
@@ -70,7 +100,7 @@ async function uploadReferences(files) {
 }
 async function api(path, data) {
   const response = await fetch('/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-  let result; try { result = await response.json(); } catch { throw new Error('本机服务返回无效响应，请确认 v0.2 服务正在运行。'); }
+  let result; try { result = await response.json(); } catch { throw new Error('本机服务返回无效响应，请确认 v0.3 服务正在运行。'); }
   if (!response.ok) throw new Error(result.error || '请求失败。');
   return result;
 }
@@ -98,11 +128,13 @@ async function analyze() {
       ocr.lines = ocr.lines.map(line => ({ ...line, relativeHeight: (line.bbox.y1 - line.bbox.y0) / image.height, centerX: (line.bbox.x0 + line.bbox.x1) / 2 / image.width }));
       ref.ocr = ocr;
     }
+    ref.evidence = extractLayoutEvidence(ref);
     measured.push(ref);
   }
   let visual = null;
-  if (mode === 'vision') { progress('视觉模型正在解读构图、字体层级、组件与品牌语气…'); const images = []; for (const ref of measured) images.push((await scaledReference(ref, 1800)).dataUrl); visual = await api('vision', { images }); }
+  if (mode === 'vision') { progress('视觉模型正在解读构图、字体层级、组件与品牌语气…'); const images = []; for (const ref of measured) images.push((await scaledReference(ref, 1800)).dataUrl); visual = await api('vision', { images, evidence: measured.map(ref => ref.evidence) }); if (Array.isArray(visual.elements) && measured[0]) measured[0].evidence.elements.push(...visual.elements.map((item, index) => ({ id: `vision-${index + 1}`, role: item.role, text: '', bbox: { x: Number(item.bbox[0]), y: Number(item.bbox[1]), width: Number(item.bbox[2]), height: Number(item.bbox[3]), confidence: Number(item.confidence || .5), source: 'vision', reason: item.reason || '' } }))); }
   project.references = measured;
+  project.analysisMode = mode; project.visualAnalysis = visual;
   setMd(buildAnalysisMd(measured, project.name, mode, visual));
   parseDesignMd(project.md);
   await persist(); renderReferences(); progress('已根据真实参考生成规范。请检查推测项，确认后进入排版。');
@@ -128,12 +160,16 @@ async function compose() {
   await document.fonts.load('600 40px Inter'); await document.fonts.load('400 24px Inter');
   for (const [index, asset] of project.assets.entries()) {
     $('#composeStatus').textContent = `正在排版 ${index + 1}/${project.assets.length}：${asset.name}`;
-    const fonts = await resolveFonts(tokens, Object.values(asset.copy).join(''));
-    const board = composeBoard({ asset, copy: asset.copy, tokens, ...project.canvas, measure, fonts, id: uid() });
+    const effectiveTokens = structuredClone(tokens);
+    const brandFamily = project.brand?.fonts?.[0]?.family;
+    if (brandFamily) { effectiveTokens.typography.title.family = brandFamily; effectiveTokens.typography.body.family = brandFamily; }
+    const fonts = await resolveFonts(effectiveTokens, Object.values(asset.copy).join(''));
+    const board = composeBoard({ asset, copy: asset.copy, tokens: effectiveTokens, ...project.canvas, measure, fonts, brandLogo: project.brand?.logo, id: uid() });
     board.mdHash = await sha256('data:text/plain;base64,' + btoa(unescape(encodeURIComponent(project.md))));
+    if (brandFamily) board.warnings.push(`品牌字体已锁定为 ${brandFamily}；Figma 端需安装同名字体。`);
     for (const role of ['title', 'body']) if (!tokens.typography[role].family.split(',').map(s => s.replace(/['"]/g, '').trim()).includes(fonts[role])) board.warnings.push(`字体替换：${tokens.typography[role].family} → ${fonts[role]}。`);
     const report = validateBoard(board, asset); if (!report.ok) throw new Error(report.errors.join('\n'));
-    const rendered = await renderBoard(board, project.assets); pendingPreviews.set(board.id, rendered.dataUrl); boards.push(board); reports.push(report);
+    const rendered = await renderBoard(board, boardAssets()); pendingPreviews.set(board.id, rendered.dataUrl); boards.push(board); reports.push(report);
   }
   project.boards = boards; project.reports = reports; previews = pendingPreviews; renderBoards(); renderReport(); await persist();
   $('#composeStatus').textContent = `完成 ${boards.length} 张真实画板。所有原图与文案均已逐项核对。`; toast('排版完成，可查看和导出真实图片。');
@@ -144,7 +180,7 @@ function renderBoards() {
   project.boards.forEach((board, index) => {
     const card = el('article', 'board-card'), button = el('button', 'board-image-button'), image = el('img'); image.src = previews.get(board.id) || ''; image.alt = board.copy.title; button.append(image);
     button.onclick = () => { $('#largePreview').src = previews.get(board.id); $('#imageDialog').showModal(); };
-    const caption = el('div', 'board-caption'), download = el('button', 'text-link', 'PNG ↓'); download.onclick = () => task(download, async () => { ensureExportable(); const result = await renderBoard(board, project.assets); downloadBlob(result.blob, `${String(index + 1).padStart(2, '0')}-${safeName(board.name)}.png`); });
+    const caption = el('div', 'board-caption'), download = el('button', 'text-link', 'PNG ↓'); download.onclick = () => task(download, async () => { ensureExportable(); const result = await renderBoard(board, boardAssets()); downloadBlob(result.blob, `${String(index + 1).padStart(2, '0')}-${safeName(board.name)}.png`); });
     caption.append(el('strong', '', board.copy.title), download); card.append(button, caption);
     if (board.warnings.length) card.append(el('p', 'board-warning', board.warnings.join(' '))); grid.append(card);
   });
@@ -166,26 +202,28 @@ function ensureExportable() {
 }
 async function figmaPackage() {
   ensureExportable(); const assets = {};
-  for (const asset of project.assets) assets[asset.id] = { id: asset.id, name: asset.name, hash: asset.hash, originalDataUrl: asset.dataUrl, ...await figmaImage(asset) };
-  return { schema: SCHEMA, project: project.name, createdAt: new Date().toISOString(), designMd: project.md, tokens: parseDesignMd(project.md).tokens, boards: project.boards, assets, reports: project.reports };
+  for (const asset of boardAssets()) assets[asset.id] = { id: asset.id, name: asset.name, hash: asset.hash, originalDataUrl: asset.dataUrl, ...await figmaImage(asset) };
+  return { schema: SCHEMA, project: project.name, createdAt: new Date().toISOString(), designMd: project.md, tokens: parseDesignMd(project.md).tokens, designSystem: buildDesignSystem(project.references, project.visualAnalysis), referenceMap: project.references.map(r => ({ name: r.name, hash: r.hash, evidence: r.evidence })), brand: project.brand, boards: project.boards, assets, reports: project.reports };
 }
 async function addPlugin(zip, prefix = '') {
   for (const name of ['manifest.json', 'code.js', 'ui.html', 'README.md']) { const response = await fetch('/figma-plugin/' + name); if (!response.ok) throw new Error('缺少 Figma 插件文件 ' + name); zip.file(prefix + name, await response.text()); }
 }
 async function exportZip(kind) {
   ensureExportable(); const zip = new JSZip(), jpg = $('#exportFormat').value === 'jpg';
-  for (const [index, board] of project.boards.entries()) { $('#exportStatus').textContent = `正在导出图片 ${index + 1}/${project.boards.length}`; const result = await renderBoard(board, project.assets, jpg ? 'image/jpeg' : 'image/png'); zip.file(`images/${String(index + 1).padStart(2, '0')}-${safeName(board.name)}.${jpg ? 'jpg' : 'png'}`, result.blob); }
+  for (const [index, board] of project.boards.entries()) { $('#exportStatus').textContent = `正在导出图片 ${index + 1}/${project.boards.length}`; const result = await renderBoard(board, boardAssets(), jpg ? 'image/jpeg' : 'image/png'); zip.file(`images/${String(index + 1).padStart(2, '0')}-${safeName(board.name)}.${jpg ? 'jpg' : 'png'}`, result.blob); }
   if (kind === 'full') {
-    zip.file('DESIGN.md', project.md); zip.file('design-system.json', JSON.stringify(parseDesignMd(project.md).tokens, null, 2)); zip.file('project.json', JSON.stringify(project));
+    zip.file('DESIGN.md', project.md); zip.file('design-system.json', JSON.stringify(buildDesignSystem(project.references, project.visualAnalysis), null, 2)); zip.file('reference-map.json', JSON.stringify(project.references.map(r => ({ name: r.name, hash: r.hash, evidence: r.evidence })), null, 2)); zip.file('project.json', JSON.stringify(project));
     zip.file('figma-import.json', JSON.stringify(await figmaPackage())); zip.file('validation-report.json', JSON.stringify(project.reports, null, 2));
     for (const [index, asset] of project.assets.entries()) { const extension = asset.dataUrl.startsWith('data:image/jpeg') ? 'jpg' : asset.dataUrl.startsWith('data:image/webp') ? 'webp' : 'png'; zip.file(`assets/${index + 1}-${safeName(asset.name)}.${extension}`, asset.dataUrl.split(',')[1], { base64: true }); }
+    if (project.brand?.logo) zip.file(`brand/logo-${safeName(project.brand.logo.name)}`, project.brand.logo.dataUrl.split(',')[1], { base64: true });
+    for (const font of project.brand?.fonts || []) zip.file(`brand/fonts/${safeName(font.name)}`, font.dataUrl.split(',')[1], { base64: true });
     await addPlugin(zip, 'figma-plugin/'); zip.file('SOP.md', await (await fetch('/SOP.md')).text());
   }
   $('#exportStatus').textContent = '正在打包 ZIP…'; downloadBlob(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }), safeName(project.name) + (kind === 'full' ? '-完整交付包.zip' : '-图片.zip')); $('#exportStatus').textContent = '导出完成。已打包实际图片与文件，不是多次模拟下载。';
 }
 async function refreshStatus() {
   const res = await fetch('/api/status'); if (!res.ok) throw new Error('本机服务不可用。'); serverStatus = await res.json();
-  if (serverStatus.version !== '0.2.0') throw new Error('当前端口不是 v0.2 服务，请按 README 重启。');
+  if (serverStatus.version !== '0.3.0') throw new Error('当前端口不是 v0.3 服务，请按 README 重启。');
   $('#connectionDot').textContent = serverStatus.vision.configured ? '●' : '○'; $('#apiBase').value = serverStatus.vision.baseUrl; $('#apiModel').value = serverStatus.vision.model; $('#apiProtocol').value = serverStatus.vision.protocol;
 }
 async function showProjects() {
@@ -198,18 +236,19 @@ async function useProject(value) {
   $('#projectMenuBtn').replaceChildren(document.createTextNode(project.name + ' '), el('span', '', '⌄'));
   $('#canvasWidth').value = project.canvas.width; $('#canvasHeight').value = project.canvas.height;
   renderReferences(); renderAssets(); renderSpec();
-  for (const board of project.boards) { try { const result = await renderBoard(board, project.assets); previews.set(board.id, result.dataUrl); } catch { invalidate('历史素材缺失，请重新生成。'); break; } }
+  await loadBrandFonts(); renderBrand();
+  for (const board of project.boards) { try { const result = await renderBoard(board, boardAssets()); previews.set(board.id, result.dataUrl); } catch { invalidate('历史素材缺失，请重新生成。'); break; } }
   renderBoards(); renderReport(); await persist();
 }
 async function restore(file) {
   if (!file) return; if (file.size > 150 * 1024 * 1024) throw new Error('项目备份超过 150MB。');
   let imported; try { imported = JSON.parse(await file.text()); } catch { throw new Error('备份不是有效 JSON。'); }
-  if (imported.schema !== SCHEMA || !Array.isArray(imported.references) || !Array.isArray(imported.assets) || imported.references.length > 20 || imported.assets.length > 30) throw new Error('备份不是 Studio Standard v0.2 的完整项目文件。旧版演示 JSON 无法还原素材。');
+  if (imported.schema !== SCHEMA || !Array.isArray(imported.references) || !Array.isArray(imported.assets) || imported.references.length > 20 || imported.assets.length > 30) throw new Error('备份不是 Studio Standard v0.3 的完整项目文件。旧版演示 JSON 无法还原素材。');
   for (const asset of [...imported.references, ...imported.assets]) {
     if (!/^data:image\/(png|jpeg|webp);base64,/.test(asset.dataUrl || '')) throw new Error('项目缺少有效原始图片。');
     if (await sha256(asset.dataUrl) !== asset.hash) throw new Error('备份素材校验不匹配。');
   }
-  const restored = { ...fresh(), id: uid(), name: String(imported.name || '恢复的项目') + ' · 恢复', references: imported.references, assets: imported.assets, md: String(imported.md || ''), canvas: imported.canvas || { width: 1080, height: 1350 }, approvedMd: '', boards: [], reports: [], history: [] };
+  const restored = { ...fresh(), id: uid(), name: String(imported.name || '恢复的项目') + ' · 恢复', references: imported.references, assets: imported.assets, brand: imported.brand || { logo: null, fonts: [] }, md: String(imported.md || ''), analysisMode: imported.analysisMode || 'local', visualAnalysis: imported.visualAnalysis || null, canvas: imported.canvas || { width: 1080, height: 1350 }, approvedMd: '', boards: [], reports: [], history: [] };
   if (restored.md) parseDesignMd(restored.md);
   await useProject(restored); $('#projectDialog').close(); go('analyze'); toast('素材与文案已恢复，请重新确认规范后生成。');
 }
@@ -226,6 +265,8 @@ function wire() {
   $('#captureBtn').onclick = () => task($('#captureBtn'), async () => { if (!$('#webUrl').value) throw new Error('请输入网页地址。'); if (project.references.length >= 20) throw new Error('参考画面已达 20 张上限。'); progress('本机浏览器正在捕获网页…'); const capture = await api('capture', { url: $('#webUrl').value }); const asset = await makeAsset(capture.dataUrl, capture.name, { source: capture.source }); project.references.push(asset); project.approvedMd = ''; renderReferences(); renderGate(); await persist(); progress(capture.source.clipped ? '网页超过 16000px，仅捕获前 16000px；完整高度见来源信息。' : '网页已捕获，可开始分析。'); });
   $('#analyzeBtn').onclick = () => task($('#analyzeBtn'), analyze);
   $('#mdInput').onchange = e => task(null, async () => { const file = e.target.files[0]; if (!file) return; if (file.size > 2 * 1024 * 1024) throw new Error('MD 文件超过 2MB。'); const md = await file.text(); parseDesignMd(md); setMd(md); e.target.value = ''; await persist(); });
+  $('#brandLogoInput').onchange = e => task(null, async () => { const file = e.target.files[0]; if (!file) return; if (file.size > 15 * 1024 * 1024) throw new Error('Logo 超过 15MB。'); const logo = await makeAsset(await readDataUrl(file), file.name, { role: 'brand-logo' }); project.brand = project.brand || { logo: null, fonts: [] }; project.brand.logo = logo; invalidate('品牌 Logo 已改变，请重新生成。'); renderBrand(); changed(); await persist(); e.target.value = ''; toast('品牌 Logo 已保存为独立图层。'); });
+  $('#brandFontInput').onchange = e => task(null, async () => { const file = e.target.files[0], family = $('#brandFontFamily').value.trim() || file?.name.replace(/\.[^.]+$/, ''); if (!file) return; if (!/^\.(ttf|otf|woff|woff2)$/i.test('.' + file.name.split('.').pop()) || file.size > 20 * 1024 * 1024) throw new Error('品牌字体仅支持 TTF、OTF、WOFF、WOFF2，且不超过 20MB。'); const dataUrl = await readDataUrl(file), font = { id: uid(), name: file.name, family, dataUrl, hash: await sha256(dataUrl), format: file.name.split('.').pop().toLowerCase() }; project.brand = project.brand || { logo: null, fonts: [] }; project.brand.fonts = [...project.brand.fonts.filter(item => item.family !== family), font]; await loadBrandFonts(); invalidate('品牌字体已改变，请重新生成。'); renderBrand(); changed(); await persist(); e.target.value = ''; toast(`品牌字体 ${family} 已加载。`); });
   $('#loadAppleBtn').onclick = () => task($('#loadAppleBtn'), async () => { const md = await (await fetch('/UI-DESIGN.md')).text(); parseDesignMd(md); setMd(md); await persist(); toast('已载入你提供的 Apple 规范；确认后才会用于新作品。'); });
   $('#mdEditor').oninput = () => { project.md = $('#mdEditor').value; project.approvedMd = ''; invalidate('规范已变化，请重新确认。'); renderGate(); $('#mdStatus').textContent = '已修改 · 待确认'; changed(); };
   $('#mdEditor').onblur = renderSpec;

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseDesignMd, measurePixels, buildAnalysisMd, composeBoard, validateBoard, wrapText, contrast } from '../lib/core.js';
+import { parseDesignMd, measurePixels, buildAnalysisMd, buildDesignSystem, extractLayoutEvidence, composeBoard, validateBoard, wrapText, contrast } from '../lib/core.js';
 
 const md = (bg = '#ffffff', mode = 'stack') => `---\nname: Test\ncolors:\n  canvas: '${bg}'\n  ink: '#1d1d1f'\n  primary: '#0066cc'\ntypography:\n  display: {fontFamily: Inter, fontSize: 80px, fontWeight: 600}\n  body: {fontFamily: Inter, fontSize: 32px, fontWeight: 400}\nlayout: {mode: ${mode}, baseWidth: 1080}\n---\n# Test`;
 const measure = (text, style) => [...text].length * style.size * .62;
@@ -28,6 +28,10 @@ test('different reference pixels produce different analysis MD and tokens',()=>{
   assert.equal(red.analysis.background,'#e6505a'); assert.ok(red.analysis.occupancy>.2);
   const a=buildAnalysisMd([red],'A'),b=buildAnalysisMd([blue],'B');assert.notEqual(a,b);assert.notEqual(parseDesignMd(a).tokens.colors.background,parseDesignMd(b).tokens.colors.background);assert.match(a,/推测/);assert.match(a,/未启用 OCR/);assert.throws(()=>buildAnalysisMd([],'x'));
 });
+test('analysis creates coordinate evidence and a machine-readable design system',()=>{
+  const ref=reference([230,80,90]);ref.ocr={confidence:91,lines:[{text:'Hero title',confidence:92,relativeHeight:.09,centerX:.2,bbox:{x0:20,y0:30,x1:340,y1:80}}]};
+  const evidence=extractLayoutEvidence(ref);assert.equal(evidence.elements[0].role,'headline');assert.equal(evidence.elements[0].bbox.source,'ocr');assert.ok(evidence.elements[0].bbox.x<.6);const system=buildDesignSystem([ref]);assert.equal(system.version,'design-system/1');assert.equal(system.references[0].evidence.elements.length, evidence.elements.length);const md=buildAnalysisMd([ref],'Evidence');assert.match(md,/Evidence Map/);assert.match(md,/confidence/);assert.equal(parseDesignMd(md).document.analysis.method,'measurement+ocr+human-review');
+});
 test('wrapping preserves spaces, Chinese, emoji and all original characters',()=>{
   for(const text of ['中文👨‍👩‍👧‍👦 xyz  123\n下一行','\n\n',' a   b ','A\r\nB']){
     const lines=wrapText(text,12,s=>[...s].length*8);assert.equal(lines.join(''),text.replace(/\r?\n/g,''));
@@ -38,6 +42,9 @@ for(const mode of ['stack','split','image-top'])for(const [w,h] of [[1080,1350],
 });
 test('no invented CTA, marketing copy or empty extra nodes',()=>{
   const b=board('stack',1080,1350,{copy:{title:'Only provided title',body:'',detail:''}});assert.equal(b.nodes.length,3);assert.deepEqual(b.nodes.filter(n=>n.type==='TEXT').map(n=>n.characters),['Only provided title']);
+});
+test('brand logo is an independent image layer and never invalidates product hash',()=>{
+  const logo={id:'logo',name:'brand.png',hash:'logo-hash',width:400,height:100};const b=board('stack',1080,1350,{brandLogo:logo});const brand=b.nodes.find(n=>n.role==='brand-logo');assert.ok(brand);assert.equal(brand.hash,'logo-hash');assert.equal(brand.assetId,'logo');assert.equal(validateBoard(b,asset).ok,true);assert.ok(b.nodes.find(n=>n.type==='IMAGE'&&n.role!=='brand-logo'));
 });
 test('MD parameter changes actually affect generated nodes',()=>{
   const a=board(),tokens=parseDesignMd(md('#112233','split')).tokens,b=board('stack',1080,1350,{tokens});assert.notEqual(a.nodes[0].color,b.nodes[0].color);assert.notEqual(a.nodes.at(-1).x,b.nodes.at(-1).x);
