@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: studio-standard
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/status
+    autoDeploy: true
+    envVars:
+      - key: STUDIO_HOST
+        value: 0.0.0.0
+      - key: NODE_ENV
+        value: production
+      - key: STUDIO_VISION_BASE_URL
+        sync: false
+      - key: STUDIO_VISION_MODEL
+        sync: false
+      - key: STUDIO_VISION_PROTOCOL
+        value: responses
+      - key: STUDIO_VISION_KEY
+        sync: false

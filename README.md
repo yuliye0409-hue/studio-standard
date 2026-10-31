@@ -13,6 +13,12 @@ node server.mjs
 
 打开 http://127.0.0.1:4174 。可用 STUDIO_PORT 更换端口。此版本仅监听本机，不应直接暴露到公网。
 
+## 公开部署（Render）
+
+GitHub Pages 只能托管静态文件，不能运行本项目的 Node API、OCR 和网页捕获。仓库已提供 Dockerfile 与 render.yaml，可在 Render 中选择 New → Blueprint，连接本仓库并部署；Render 会从 GitHub 自动构建并在成功后提供 HTTPS 地址。Render 的 Docker 服务会使用 Playwright 基础镜像，以便网页捕获功能拥有浏览器运行时。
+
+部署前必须设置 `STUDIO_VISION_KEY` 等服务端环境变量，不要把密钥写进仓库。公开部署前还应增加登录/访问控制、限流和云端项目存储；当前项目数据仍保存在每个用户自己的浏览器 IndexedDB，公开网址不会自动共享项目。
+
 这样不需要全局安装 pnpm，也不需要管理员权限执行 `corepack enable`。如果你已经安装了 pnpm，直接运行 `pnpm install` 也可以。
 
 当前机器若没有 Node.js，可先安装 Node.js 22+；不能只下载 GitHub 网页文件运行。

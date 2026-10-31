@@ -8,7 +8,7 @@ import { chromium } from 'playwright';
 
 const root = dirname(fileURLToPath(import.meta.url)), require = createRequire(import.meta.url);
 try { process.loadEnvFile(join(root, '.env')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-const port = Number(process.env.STUDIO_PORT || 4174);
+const port = Number(process.env.STUDIO_PORT || process.env.PORT || 4174);
 const config = { baseUrl: process.env.STUDIO_VISION_BASE_URL || 'https://api.openai.com/v1', model: process.env.STUDIO_VISION_MODEL || '', key: process.env.STUDIO_VISION_KEY || process.env.OPENAI_API_KEY || '', protocol: process.env.STUDIO_VISION_PROTOCOL || 'responses' };
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8', '.wasm': 'application/wasm', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.gz': 'application/gzip', '.bcmap': 'application/octet-stream' };
 let browserPromise, ocrPromise, ocrQueue = Promise.resolve();
@@ -96,7 +96,8 @@ export const server = createServer(async (req, res) => {
   try {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname.startsWith('/api/')) {
-      if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) return json(res, 403, { error: '仅允许工作台自身调用本机接口。' });
+      const host = req.headers.host, configuredOrigin = process.env.STUDIO_PUBLIC_ORIGIN?.replace(/\/$/, ''), origins = new Set([`http://${host}`, `https://${host}`, configuredOrigin].filter(Boolean));
+      if (req.headers.origin && !origins.has(req.headers.origin)) return json(res, 403, { error: '仅允许当前工作台来源调用接口。' });
       if (pathname === '/api/status' && req.method === 'GET') return json(res, 200, { version: '0.3.0', ocr: true, capture: true, structureEvidence: true, vision: { configured: Boolean(config.key && config.model), model: config.model, baseUrl: config.baseUrl, protocol: config.protocol } });
       if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
       const input = await body(req);
