@@ -56,6 +56,11 @@ function renderSpec() {
     if (project.md) {
       const { tokens, warnings } = parseDesignMd(project.md);
       for (const [key, color] of Object.entries(tokens.colors)) { if (key === 'muted') continue; const chip = el('span', 'token-chip'); const dot = el('i'); dot.style.background = color; chip.append(dot, el('span', '', key + ' ' + color)); container.append(chip); }
+      if (tokens.aPlus?.modules?.length) {
+        const moduleChip = el('span', 'token-chip');
+        moduleChip.append(el('span', '', `A+ 模块 ${tokens.aPlus.modules.length} 个 · 可复用槽位已生成`));
+        container.append(moduleChip);
+      }
       $('#specWarnings').textContent = warnings.join(' ') || '修改后的 MD 会真实影响配色、字体、间距和布局。';
     } else $('#specWarnings').textContent = '规范修改后需要重新确认；旧排版会失效。';
   } catch (error) { $('#specWarnings').textContent = error.message; }
