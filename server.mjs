@@ -1,17 +1,16 @@
 import { createServer } from 'node:http';
-import { readFile, mkdir, copyFile, access } from 'node:fs/promises';
+import { readFile, mkdir, copyFile } from 'node:fs/promises';
 import { extname, resolve, relative, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { createWorker } from 'tesseract.js';
-import { chromium } from 'playwright';
 
 const root = dirname(fileURLToPath(import.meta.url)), require = createRequire(import.meta.url);
 try { process.loadEnvFile(join(root, '.env')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 const port = Number(process.env.STUDIO_PORT || process.env.PORT || 4174);
 const config = { baseUrl: process.env.STUDIO_VISION_BASE_URL || 'https://api.openai.com/v1', model: process.env.STUDIO_VISION_MODEL || '', key: process.env.STUDIO_VISION_KEY || process.env.OPENAI_API_KEY || '', protocol: process.env.STUDIO_VISION_PROTOCOL || 'responses' };
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8', '.wasm': 'application/wasm', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.gz': 'application/gzip', '.bcmap': 'application/octet-stream' };
-let browserPromise, ocrPromise, ocrQueue = Promise.resolve();
+let ocrPromise, ocrQueue = Promise.resolve();
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(value)); };
 async function body(req) {
   const chunks = []; let size = 0;
@@ -21,15 +20,6 @@ async function body(req) {
 function imageBytes(dataUrl) {
   if (typeof dataUrl !== 'string' || !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(dataUrl)) throw new Error('无效的图片数据。');
   return Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64');
-}
-async function browser() {
-  if (!browserPromise) browserPromise = (async () => {
-    const candidates = [process.env.STUDIO_BROWSER_PATH, 'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].filter(Boolean);
-    let executablePath;
-    for (const path of candidates) { try { await access(path); executablePath = path; break; } catch {} }
-    try { return await chromium.launch({ executablePath, headless: true }); } catch { browserPromise = undefined; throw new Error('未找到可用浏览器。请安装 Chrome，或运行 pnpm exec playwright install chromium。'); }
-  })();
-  return browserPromise;
 }
 async function ocrWorker() {
   if (!ocrPromise) ocrPromise = (async () => {
@@ -76,29 +66,13 @@ async function vision(images, evidence = []) {
   return parsed;
 }
 
-async function capture(urlString, width) {
-  let url; try { url = new URL(urlString); } catch { throw new Error('请输入有效的网页 URL。'); }
-  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw new Error('仅支持不含账号密码的 HTTP/HTTPS 网页。');
-  if (['localhost', '127.0.0.1'].includes(url.hostname) && Number(url.port || 80) === port) throw new Error('请提供参考网页，不能捕获工作台自身。');
-  const instance = await browser();
-  const context = await instance.newContext({ viewport: { width: Math.max(375, Math.min(1920, Number(width) || 1440)), height: 1000 }, deviceScaleFactor: 1 });
-  try {
-    const page = await context.newPage(); page.setDefaultTimeout(30000);
-    await page.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.evaluate(async () => { await Promise.race([document.fonts.ready, new Promise(r => setTimeout(r, 4000))]); for (let y = 0; y < Math.min(document.body.scrollHeight, 16000); y += 900) { window.scrollTo(0, y); await new Promise(r => setTimeout(r, 70)); } window.scrollTo(0, 0); });
-    const meta = await page.evaluate(() => ({ title: document.title, height: document.documentElement.scrollHeight, width: innerWidth, styles: ['body', 'h1', 'h2', 'p'].map(selector => { const el = document.querySelector(selector); if (!el) return null; const s = getComputedStyle(el); return { selector, font: s.fontFamily, size: s.fontSize, color: s.color, background: s.backgroundColor }; }).filter(Boolean) }));
-    const screenshot = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: meta.width, height: Math.min(meta.height, 16000) }, animations: 'disabled' });
-    return { dataUrl: 'data:image/png;base64,' + screenshot.toString('base64'), name: meta.title || url.hostname, source: { type: 'web', url: url.href, capturedAt: new Date().toISOString(), styles: meta.styles, clipped: meta.height > 16000, fullHeight: meta.height } };
-  } finally { await context.close(); }
-}
-
 export const server = createServer(async (req, res) => {
   try {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname.startsWith('/api/')) {
       const host = req.headers.host, configuredOrigin = process.env.STUDIO_PUBLIC_ORIGIN?.replace(/\/$/, ''), origins = new Set([`http://${host}`, `https://${host}`, configuredOrigin].filter(Boolean));
       if (req.headers.origin && !origins.has(req.headers.origin)) return json(res, 403, { error: '仅允许当前工作台来源调用接口。' });
-      if (pathname === '/api/status' && req.method === 'GET') return json(res, 200, { version: '0.3.0', ocr: true, capture: true, structureEvidence: true, vision: { configured: Boolean(config.key && config.model), model: config.model, baseUrl: config.baseUrl, protocol: config.protocol } });
+      if (pathname === '/api/status' && req.method === 'GET') return json(res, 200, { version: '0.3.0', ocr: true, capture: false, structureEvidence: true, vision: { configured: Boolean(config.key && config.model), model: config.model, baseUrl: config.baseUrl, protocol: config.protocol } });
       if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
       const input = await body(req);
       if (pathname === '/api/config') {
@@ -111,7 +85,6 @@ export const server = createServer(async (req, res) => {
       }
       if (pathname === '/api/ocr') return json(res, 200, await recognize(input.dataUrl));
       if (pathname === '/api/vision') return json(res, 200, await vision(input.images, input.evidence));
-      if (pathname === '/api/capture') return json(res, 200, await capture(input.url, input.width));
       return json(res, 404, { error: 'Not found' });
     }
     if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405); return res.end(); }
@@ -128,5 +101,5 @@ export const server = createServer(async (req, res) => {
 });
 
 server.listen(port, process.env.STUDIO_HOST || '127.0.0.1', () => console.log(`Studio Standard v0.3 · http://${process.env.STUDIO_HOST || '127.0.0.1'}:${port}`));
-async function shutdown() { server.close(); if (browserPromise) await (await browserPromise).close(); if (ocrPromise) await (await ocrPromise).terminate(); process.exit(0); }
+async function shutdown() { server.close(); if (ocrPromise) await (await ocrPromise).terminate(); process.exit(0); }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);

@@ -1,1 +1,21 @@
 .brand-upload-row{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.brand-upload-row .file-button{font-size:12px}.brand-logo-preview{display:flex;align-items:center;gap:12px;min-height:45px;margin-top:15px}.brand-logo-preview img{max-width:150px;max-height:48px;object-fit:contain;background:white;border:1px solid #eee;padding:5px}.brand-font-list{display:grid;gap:7px;margin-top:12px}.brand-font-row{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:white;border:1px solid #eee;border-radius:8px;font-size:11px}.evidence-reference{padding:10px 0;border-bottom:1px solid #eee}.evidence-reference>strong{display:block;font-size:11px;margin-bottom:7px}.evidence-row{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:10px;color:var(--muted);padding:5px 0}.evidence-row select{font-size:10px;padding:4px 6px;min-width:92px}.evidence-panel{border-top:1px solid #eee;padding-top:14px;margin-top:8px}.evidence-panel summary{font-size:12px;color:var(--ink);cursor:pointer}.evidence-panel>p{margin:10px 0}
+
+.compose-grid{grid-template-columns:minmax(340px,420px) minmax(0,1fr)}
+.compose-grid>aside{min-width:0;display:block}
+.asset-list{display:grid;gap:18px;max-height:1000px;overflow-y:auto;padding:2px 6px 2px 2px}
+.asset-card{border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0;background:#fff}
+.asset-card-heading{display:flex;align-items:center;gap:12px;min-width:0}
+.asset-card-heading img{width:84px;height:84px;object-fit:contain;background:var(--paper);border-radius:8px;flex-shrink:0}
+.asset-card-heading>div{min-width:0}
+.asset-card-heading h3{font-size:14px;margin:0;overflow-wrap:anywhere}
+.asset-card-heading p{margin:6px 0 0}
+.asset-card textarea{display:block;width:100%;resize:vertical;min-height:60px}
+.asset-card textarea[aria-invalid=true]{border:2px solid #b42318}
+.asset-card .button-row{margin-top:14px;gap:14px}
+.asset-card .secondary{font-size:11px;padding:6px 9px;min-height:34px}
+.board-review{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:12px;cursor:pointer}
+.board-review input{width:18px;height:18px;flex-shrink:0;accent-color:var(--blue)}
+.review-actions{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:24px;flex-wrap:wrap}
+.compose-toolbar #assetCount{font-size:12px}
+@media(max-width:1000px){.compose-grid{grid-template-columns:minmax(310px,380px) minmax(0,1fr)}.board-grid{grid-template-columns:1fr}}
+@media(max-width:833px){.compose-grid{grid-template-columns:1fr}.asset-list{max-height:none;overflow:visible}.asset-card-heading img{width:96px;height:96px}.review-actions .pill{width:100%}}
