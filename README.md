@@ -7,13 +7,25 @@
 需要 Node.js 22+、pnpm，以及 Chrome / Edge（用于网页捕获）。
 
 ```powershell
-pnpm install
+npx --yes pnpm@11.25.0 install
 node server.mjs
 ```
 
 打开 http://127.0.0.1:4174 。可用 STUDIO_PORT 更换端口。此版本仅监听本机，不应直接暴露到公网。
 
-当前机器若没有 pnpm 命令，可使用已配置的运行时：
+这样不需要全局安装 pnpm，也不需要管理员权限执行 `corepack enable`。如果你已经安装了 pnpm，直接运行 `pnpm install` 也可以。
+
+当前机器若没有 Node.js，可先安装 Node.js 22+；不能只下载 GitHub 网页文件运行。
+
+当前机器若已有项目目录，更新源码：
+
+```powershell
+git pull
+npx --yes pnpm@11.25.0 install
+node server.mjs
+```
+
+旧环境的备用运行时命令：
 
 ```powershell
 & 'C:\Users\19708\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd' install
