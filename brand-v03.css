@@ -19,3 +19,17 @@
 .compose-toolbar #assetCount{font-size:12px}
 @media(max-width:1000px){.compose-grid{grid-template-columns:minmax(310px,380px) minmax(0,1fr)}.board-grid{grid-template-columns:1fr}}
 @media(max-width:833px){.compose-grid{grid-template-columns:1fr}.asset-list{max-height:none;overflow:visible}.asset-card-heading img{width:96px;height:96px}.review-actions .pill{width:100%}}
+
+.brand-upload-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:14px 0}
+.brand-dropzone{position:relative;display:flex;min-width:0;min-height:118px;flex-direction:column;align-items:center;justify-content:center;gap:7px;padding:14px 10px;border:1px dashed #c7c7cc;border-radius:8px;background:#fff;text-align:center;cursor:pointer;transition:border-color .15s,background .15s}
+.brand-dropzone:hover,.brand-dropzone.dragging{border-color:var(--blue);background:#eff6fc}
+.brand-dropzone input{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}
+.brand-drop-icon{color:var(--blue);font-size:21px;line-height:1}
+.brand-dropzone strong{font-size:12px;font-weight:600}
+.brand-dropzone span:last-child{font-size:10px;line-height:1.45;color:var(--muted)}
+.evidence-row{display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid #eee}
+.evidence-copy{min-width:0}
+.evidence-copy strong{display:block;font-size:12px;font-weight:500;overflow-wrap:anywhere}
+.evidence-copy p{font-size:10px;color:var(--muted);margin:4px 0 0;overflow-wrap:anywhere}
+.evidence-row select{font-size:11px;padding:8px;min-width:0}
+@media(max-width:600px){.brand-upload-grid{grid-template-columns:1fr}.evidence-row{grid-template-columns:1fr;gap:7px}}

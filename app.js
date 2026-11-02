@@ -71,14 +71,50 @@ function renderSpec() {
 function renderEvidence() {
   const container = $('#evidenceList'); if (!container) return; container.replaceChildren();
   const roles = [['headline','标题'],['body','正文'],['price','价格/规格'],['product','商品候选'],['decorative','装饰'],['unknown','待确认']];
+  const sources = { ocr: '文字识别', vision: '视觉模型', 'pixel-occupancy': '图像区域测量', inferred: '系统推断' };
   const refs = project.references.filter(r => r.evidence?.elements?.length);
-  if (!refs.length) { container.append(el('p', 'fine-print', '分析后这里会显示带坐标、来源和置信度的结构证据。')); return; }
-  refs.forEach(ref => { const section = el('div', 'evidence-reference'); section.append(el('strong', '', ref.name)); for (const [index, item] of ref.evidence.elements.entries()) {
-    const row = el('div', 'evidence-row'), meta = el('span', '', `${item.id} · ${item.source} · ${Math.round(item.bbox.confidence * 100)}%`), select = document.createElement('select');
+  if (!refs.length) { container.append(el('p', 'fine-print', '分析参考图后，这里会列出识别到的文字和图像区域。')); return; }
+  refs.forEach(ref => { const section = el('div', 'evidence-reference'); section.append(el('strong', '', ref.name)); for (const item of ref.evidence.elements) {
+    const row = el('div', 'evidence-row'), copy = el('div', 'evidence-copy'), select = document.createElement('select');
+    const title = item.text?.trim() ? `识别文字：${item.text.trim()}` : item.role === 'product' ? '图像区域候选' : '未识别到文字内容';
+    const source = item.bbox?.source || item.source || 'unknown', confidence = Math.round((Number(item.bbox?.confidence) || 0) * 100);
+    row.dataset.elementId = item.id;
+    copy.append(el('strong', '', title), el('p', 'evidence-source', `来源：${sources[source] || source} · 置信度：${confidence}%`));
     roles.forEach(([value, label]) => { const option = el('option', '', label); option.value = value; option.selected = item.role === value; select.append(option); });
+    select.className = 'evidence-role-select'; select.setAttribute('aria-label', `识别用途：${title}`);
     select.onchange = () => { item.role = select.value; project.md = buildAnalysisMd(project.references, project.name, project.analysisMode || 'local', project.visualAnalysis); project.approvedMd = ''; invalidate('证据角色已调整，请重新确认规范。'); renderSpec(); changed(); };
-    row.append(meta, select); if (item.text) row.title = item.text; section.append(row);
+    row.append(copy, select); section.append(row);
   } container.append(section); });
+}
+
+function bindBrandDropzone(zoneId, inputId, saveFile) {
+  const zone = $('#' + zoneId), input = $('#' + inputId);
+  const handle = file => task(null, async () => {
+    try { if (file) await saveFile(file); }
+    finally { input.value = ''; }
+  });
+  input.onchange = () => handle(input.files[0]);
+  for (const type of ['dragenter', 'dragover']) zone.addEventListener(type, event => { event.preventDefault(); zone.classList.add('dragging'); });
+  for (const type of ['dragleave', 'drop']) zone.addEventListener(type, event => {
+    event.preventDefault(); zone.classList.remove('dragging');
+    if (type === 'drop') handle(event.dataTransfer.files[0]);
+  });
+}
+
+async function saveBrandLogo(file) {
+  if (file.size > 15 * 1024 * 1024) throw new Error('Logo 超过 15MB。');
+  if (!/^image\/(png|jpeg|webp|svg\+xml)$/.test(file.type)) throw new Error('Logo 仅支持 PNG、JPG、WebP 或 SVG。');
+  const logo = await makeAsset(await readDataUrl(file), file.name, { role: 'brand-logo' });
+  project.brand = project.brand || { logo: null, fonts: [] }; project.brand.logo = logo;
+  invalidate('品牌 Logo 已改变，请重新生成。'); renderBrand(); changed(); await persist(); toast('品牌 Logo 已保存为独立图层。');
+}
+
+async function saveBrandFont(file) {
+  const family = file.name.replace(/\.[^.]+$/, '').replace(/[^\w\u3400-\u9fff -]/g, ' ').trim() || 'Brand Font';
+  if (!/\.(ttf|otf|woff|woff2)$/i.test(file.name) || file.size > 20 * 1024 * 1024) throw new Error('品牌字体仅支持 TTF、OTF、WOFF、WOFF2，且不超过 20MB。');
+  const dataUrl = await readDataUrl(file), font = { id: uid(), name: file.name, family, dataUrl, hash: await sha256(dataUrl), format: file.name.split('.').pop().toLowerCase() };
+  project.brand = project.brand || { logo: null, fonts: [] }; project.brand.fonts = [...project.brand.fonts.filter(item => item.family !== family), font];
+  await loadBrandFonts(); invalidate('品牌字体已改变，请重新生成。'); renderBrand(); changed(); await persist(); toast(`品牌字体 ${family} 已加载；Figma 中请安装并核对原字体。`);
 }
 function renderHistory() {
   const list = $('#historyList'); list.replaceChildren();
@@ -319,8 +355,8 @@ function wire() {
 
   $('#analyzeBtn').onclick = () => task($('#analyzeBtn'), analyze);
   $('#mdInput').onchange = e => task(null, async () => { const file = e.target.files[0]; if (!file) return; if (file.size > 2 * 1024 * 1024) throw new Error('MD 文件超过 2MB。'); const md = await file.text(); parseDesignMd(md); setMd(md); e.target.value = ''; await persist(); });
-  $('#brandLogoInput').onchange = e => task(null, async () => { const file = e.target.files[0]; if (!file) return; if (file.size > 15 * 1024 * 1024) throw new Error('Logo 超过 15MB。'); const logo = await makeAsset(await readDataUrl(file), file.name, { role: 'brand-logo' }); project.brand = project.brand || { logo: null, fonts: [] }; project.brand.logo = logo; invalidate('品牌 Logo 已改变，请重新生成。'); renderBrand(); changed(); await persist(); e.target.value = ''; toast('品牌 Logo 已保存为独立图层。'); });
-  $('#brandFontInput').onchange = e => task(null, async () => { const file = e.target.files[0], family = file?.name.replace(/\.[^.]+$/, '').replace(/[^\w\u3400-\u9fff -]/g, ' ').trim() || 'Brand Font'; if (!file) return; if (!/^\.(ttf|otf|woff|woff2)$/i.test('.' + file.name.split('.').pop()) || file.size > 20 * 1024 * 1024) throw new Error('品牌字体仅支持 TTF、OTF、WOFF、WOFF2，且不超过 20MB。'); const dataUrl = await readDataUrl(file), font = { id: uid(), name: file.name, family, dataUrl, hash: await sha256(dataUrl), format: file.name.split('.').pop().toLowerCase() }; project.brand = project.brand || { logo: null, fonts: [] }; project.brand.fonts = [...project.brand.fonts.filter(item => item.family !== family), font]; await loadBrandFonts(); invalidate('品牌字体已改变，请重新生成。'); renderBrand(); changed(); await persist(); e.target.value = ''; toast(`品牌字体 ${family} 已加载；Figma 中请安装并核对原字体。`); });
+  bindBrandDropzone('brandLogoDropzone', 'brandLogoInput', saveBrandLogo);
+  bindBrandDropzone('brandFontDropzone', 'brandFontInput', saveBrandFont);
   $('#loadAppleBtn').onclick = () => task($('#loadAppleBtn'), async () => { const md = await (await fetch('/UI-DESIGN.md')).text(); parseDesignMd(md); setMd(md); await persist(); toast('已载入你提供的 Apple 规范；确认后才会用于新作品。'); });
   $('#mdEditor').oninput = () => { project.md = $('#mdEditor').value; project.approvedMd = ''; invalidate('规范已变化，请重新确认。'); renderGate(); $('#mdStatus').textContent = '已修改 · 待确认'; changed(); };
   $('#mdEditor').onblur = renderSpec;
