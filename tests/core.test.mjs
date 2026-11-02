@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { parseDesignMd, measurePixels, buildAnalysisMd, buildDesignSystem, extractLayoutEvidence, composeBoard, validateBoard, wrapText, contrast } from '../lib/core.js';
+import { parseDesignMd, measurePixels, buildAnalysisMd, buildDesignSystem, extractLayoutEvidence, extractAPlusModules, composeBoard, validateBoard, wrapText, contrast } from '../lib/core.js';
 
 const md = (bg = '#ffffff', mode = 'stack') => `---\nname: Test\ncolors:\n  canvas: '${bg}'\n  ink: '#1d1d1f'\n  primary: '#0066cc'\ntypography:\n  display: {fontFamily: Inter, fontSize: 80px, fontWeight: 600}\n  body: {fontFamily: Inter, fontSize: 32px, fontWeight: 400}\nlayout: {mode: ${mode}, baseWidth: 1080}\n---\n# Test`;
 const measure = (text, style) => [...text].length * style.size * .62;
@@ -31,6 +31,14 @@ test('different reference pixels produce different analysis MD and tokens',()=>{
 test('analysis creates coordinate evidence and a machine-readable design system',()=>{
   const ref=reference([230,80,90]);ref.ocr={confidence:91,lines:[{text:'Hero title',confidence:92,relativeHeight:.09,centerX:.2,bbox:{x0:20,y0:30,x1:340,y1:80}}]};
   const evidence=extractLayoutEvidence(ref);assert.equal(evidence.elements[0].role,'headline');assert.equal(evidence.elements[0].bbox.source,'ocr');assert.ok(evidence.elements[0].bbox.x<.6);const system=buildDesignSystem([ref]);assert.equal(system.version,'design-system/1');assert.equal(system.references[0].evidence.elements.length, evidence.elements.length);const md=buildAnalysisMd([ref],'Evidence');assert.match(md,/Evidence Map/);assert.match(md,/confidence/);assert.equal(parseDesignMd(md).document.analysis.method,'measurement+ocr+human-review');
+});
+test('long A+ references without reliable structure are not divided into invented equal sections',()=>{
+  const ref={...reference([230,80,90]),width:1500,height:7995,evidence:{elements:[]}};
+  const spec=extractAPlusModules(ref);assert.equal(spec.moduleCount,1);assert.equal(spec.modules[0].source,'unsegmented-image');assert.equal(spec.modules[0].confidence,.15);assert.equal(spec.modules[0].template.imageSlots.length,0);
+});
+test('model-provided A+ module and slot geometry is preserved in the reusable specification',()=>{
+  const ref={...reference([230,80,90]),aPlusModules:[{type:'image-text-split',bbox:[.05,.2,.9,.3],confidence:.92,reason:'左右分栏',imageSlots:[{role:'product',bbox:[.02,.1,.55,.8]}],textSlots:[{role:'headline',bbox:[.62,.2,.32,.18],maxLines:2,required:true}]}]};
+  const spec=extractAPlusModules(ref);assert.equal(spec.moduleCount,1);assert.equal(spec.modules[0].source,'vision');assert.deepEqual([spec.modules[0].x,spec.modules[0].y,spec.modules[0].width,spec.modules[0].height],[.05,.2,.9,.3]);assert.deepEqual(spec.modules[0].template.imageSlots[0].bbox,{x:.02,y:.1,width:.55,height:.8,confidence:.5,source:'vision'});assert.equal(spec.modules[0].template.textSlots[0].required,true);
 });
 test('wrapping preserves spaces, Chinese, emoji and all original characters',()=>{
   for(const text of ['中文👨‍👩‍👧‍👦 xyz  123\n下一行','\n\n',' a   b ','A\r\nB']){

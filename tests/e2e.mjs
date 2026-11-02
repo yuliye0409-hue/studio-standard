@@ -12,7 +12,7 @@ await mkdir(results,{recursive:true});
 let serverOutput='',browser,fixture,child;
 const passed=[]; const pass=label=>{passed.push(label);console.log('PASS '+label);};
 const post=async(path,data,extra={})=>{const r=await fetch(base+'/api/'+path,{method:'POST',headers:{'Content-Type':'application/json',...extra},body:JSON.stringify(data)});return{status:r.status,data:await r.json()};};
-const visionResult={description:'Test provider fixture: measured blue reference, not a live model result.',colors:{canvas:'#f5f5f7',ink:'#1d1d1f',primary:'#0066cc'},layout:{mode:'split',align:'left'},notes:'Integration fixture only.'};
+const visionResult={description:'Test provider fixture: measured blue reference, not a live model result.',colors:{canvas:'#f5f5f7',ink:'#1d1d1f',primary:'#0066cc'},layout:{mode:'split',align:'left'},notes:'Integration fixture only.',references:[{index:0,elements:[],modules:[{type:'hero',bbox:[0,0,1,1],confidence:.9,reason:'fixture module',imageSlots:[],textSlots:[]}]}]};
 try{
   child=spawn(process.execPath,['server.mjs'],{cwd:process.cwd(),env:{...process.env,STUDIO_PORT:String(port),STUDIO_VISION_KEY:'',OPENAI_API_KEY:'',STUDIO_VISION_MODEL:''},stdio:['ignore','pipe','pipe'],windowsHide:true});
   child.stdout.on('data',b=>serverOutput+=b);child.stderr.on('data',b=>serverOutput+=b);
@@ -21,8 +21,8 @@ try{
   fixture=createServer(async(req,res)=>{let raw='';for await(const b of req)raw+=b;requests.push({url:req.url,body:JSON.parse(raw||'{}'),authorization:req.headers.authorization});if(req.url==='/fail/responses'){res.writeHead(503);return res.end('{}');}res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url.endsWith('/chat/completions')?{choices:[{message:{content:JSON.stringify(visionResult)}}]}:{output:[{content:[{type:'output_text',text:JSON.stringify(visionResult)}]}]}));});
   await new Promise(r=>fixture.listen(0,'127.0.0.1',r));const mock=`http://127.0.0.1:${fixture.address().port}`;
   browser=await chromium.launch({executablePath:process.env.STUDIO_BROWSER_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe',headless:true});
-  const context=await browser.newContext({viewport:{width:1440,height:1080},acceptDownloads:true}),page=await context.newPage(),errors=[];
-  page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
+  const context=await browser.newContext({viewport:{width:1440,height:1080},acceptDownloads:true}),page=await context.newPage(),errors=[],dialogMessages=[];
+  page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>{dialogMessages.push(d.message());d.accept();});
   await page.goto(base);await page.waitForSelector('body[data-ready="true"]');
   await page.screenshot({path:resolve(results,'desktop-overview.png'),fullPage:true});
   assert.equal(await page.locator('.global-nav').evaluate(e=>getComputedStyle(e).height),'44px');
@@ -38,7 +38,7 @@ try{
   const awaitIdle=async()=>{await page.waitForFunction(()=>!document.querySelector('#composeBtn').disabled&&!document.querySelector('#analyzeBtn').disabled);};
   const goto=async view=>{await page.locator(`[data-view="${view}"]`).first().click();};
   await goto('analyze');await page.locator('#referenceInput').setInputFiles([asFile(fixtures.ref,'reference-blue.png')]);await page.waitForFunction(()=>document.querySelectorAll('.reference-item').length===1);await awaitIdle();
-  await page.locator('#analysisMode').selectOption('pixels');await page.locator('#analyzeBtn').click();await page.waitForFunction(()=>document.querySelector('#mdEditor').value.includes('SHA-256'));await awaitIdle();
+  await page.locator('#analysisMode').selectOption('pixels');await page.locator('#analyzeBtn').click();await page.waitForFunction(()=>document.querySelector('#mdEditor').value.includes('SHA-256'));await awaitIdle();assert.match(dialogMessages[0],/尚未配置视觉模型/);pass('missing model prompts before local image analysis');
   const md=await page.locator('#mdEditor').inputValue();assert.match(md,/#e7eefb/);assert.match(md,/reference-blue.png/);assert.doesNotMatch(md,/A photography-first interface/);assert.match(md,/Evidence Map/);assert.ok(await page.locator('#evidenceList .evidence-row').count()>0);pass('real reference pixels generate source-linked project MD and coordinate evidence map');
   const downloaded=async(selector)=>{const [d]=await Promise.all([page.waitForEvent('download'),page.locator(selector).click()]);const stream=await d.createReadStream(),chunks=[];for await(const chunk of stream)chunks.push(chunk);await awaitIdle();return{buffer:Buffer.concat(chunks),name:d.suggestedFilename()};};
   const mdDownload=await downloaded('#downloadMdBtn');assert.equal(mdDownload.buffer.toString('utf8'),md);pass('MD download contains the actual generated document');

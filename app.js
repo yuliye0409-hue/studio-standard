@@ -118,8 +118,17 @@ async function scaledReference(ref, maximum = 2000) {
 async function analyze() {
   if (!project.references.length) throw new Error('请先上传参考设计图片。');
   const mode = $('#analysisMode').value;
+  await refreshStatus();
+  if (!serverStatus?.vision?.configured) {
+    if (mode === 'vision') {
+      $('#settingsDialog').showModal();
+      toast('尚未配置视觉模型。配置并保存后，重新点击“分析参考设计”。', true);
+      return;
+    }
+    const continueLocal = confirm('尚未配置视觉模型。继续将只使用本地像素测量和 OCR，长图模块边界、图文关系及语义识别可能不准确，生成的模块需要人工核对。\n\n确定：继续本地分析\n取消：打开视觉模型设置');
+    if (!continueLocal) { $('#settingsDialog').showModal(); return; }
+  }
   if (mode === 'vision') {
-    await refreshStatus(); if (!serverStatus?.vision?.configured) { $('#settingsDialog').showModal(); throw new Error('请先配置支持图片输入的视觉模型。没有使用示例结果。'); }
     if (!confirm(`将向 ${serverStatus.vision.baseUrl} 发送本项目的 ${project.references.length} 张参考图用于分析，可能产生服务商费用。是否继续？`)) return;
   }
   const measured = [];
@@ -130,14 +139,24 @@ async function analyze() {
       progress(`本地 OCR ${index + 1}/${project.references.length}：${reference.name}（中英文识别）`);
       const image = await scaledReference(ref);
       const ocr = await api('ocr', { dataUrl: image.dataUrl });
-      ocr.lines = ocr.lines.map(line => ({ ...line, relativeHeight: (line.bbox.y1 - line.bbox.y0) / image.height, centerX: (line.bbox.x0 + line.bbox.x1) / 2 / image.width }));
+      ocr.lines = ocr.lines.map(line => ({ ...line, relativeHeight: (line.bbox.y1 - line.bbox.y0) / image.height, centerX: (line.bbox.x0 + line.bbox.x1) / 2 / image.width, bbox: { x0: line.bbox.x0 * ref.width / image.width, y0: line.bbox.y0 * ref.height / image.height, x1: line.bbox.x1 * ref.width / image.width, y1: line.bbox.y1 * ref.height / image.height } }));
       ref.ocr = ocr;
     }
     ref.evidence = extractLayoutEvidence(ref);
     measured.push(ref);
   }
   let visual = null;
-  if (mode === 'vision') { progress('视觉模型正在解读构图、字体层级、组件与品牌语气…'); const images = []; for (const ref of measured) images.push((await scaledReference(ref, 1800)).dataUrl); visual = await api('vision', { images, evidence: measured.map(ref => ref.evidence) }); if (Array.isArray(visual.elements) && measured[0]) measured[0].evidence.elements.push(...visual.elements.map((item, index) => ({ id: `vision-${index + 1}`, role: item.role, text: '', bbox: { x: Number(item.bbox[0]), y: Number(item.bbox[1]), width: Number(item.bbox[2]), height: Number(item.bbox[3]), confidence: Number(item.confidence || .5), source: 'vision', reason: item.reason || '' } }))); }
+  if (mode === 'vision') {
+    progress('视觉模型正在逐张识别模块边界、图文槽位与整套视觉规则…');
+    const images = [];
+    for (const ref of measured) images.push((await scaledReference(ref, 2400)).dataUrl);
+    visual = await api('vision', { images, evidence: measured.map(ref => ref.evidence) });
+    for (const [index, ref] of measured.entries()) {
+      const analyzed = visual.references[index];
+      ref.aPlusModules = analyzed.modules;
+      ref.evidence.elements.push(...analyzed.elements.map((item, itemIndex) => ({ id: `vision-${itemIndex + 1}`, role: item.role, text: '', bbox: { x: Number(item.bbox[0]), y: Number(item.bbox[1]), width: Number(item.bbox[2]), height: Number(item.bbox[3]), confidence: Number(item.confidence ?? .5), source: 'vision', reason: item.reason || '' } })));
+    }
+  }
   project.references = measured;
   project.analysisMode = mode; project.visualAnalysis = visual;
   setMd(buildAnalysisMd(measured, project.name, mode, visual));
