@@ -203,8 +203,8 @@ function renderAssets() {
     const match = project.boards.find(b => b.assetId === asset.id)?.layoutMatch;
     if (match) card.append(el('p', 'fine-print asset-layout-result', match.kind === 'module' ? `已匹配：${match.label} · 原图槽位利用率 ${Math.round(match.imageFit * 100)}%` : `${match.label}：${match.reason}`));
     if (compositionErrors.has(asset.id)) { const error = el('p', 'asset-layout-error', compositionErrors.get(asset.id)); error.setAttribute('role', 'alert'); card.append(error); }
-    for (const [field, label, rows, hint] of [['title', '标题 · 必填', 2, '填写这张图片的标题'], ['body', '正文 / 卖点', 4, '填写这张图片的卖点，支持换行'], ['detail', '补充信息', 2, '型号、价格、说明等；可留空']]) {
-      const input = el('textarea'); input.id = `copy-${asset.id}-${field}`; input.dataset.field = field; input.rows = rows; input.value = asset.copy[field] || ''; input.placeholder = hint; input.required = field === 'title';
+    for (const [field, label, rows, hint] of [['title', '标题 / 主文案（可留空）', 2, '仅填写需求方提供的标题或主文案'], ['body', '正文 / 卖点（可留空）', 4, '仅填写需求方提供的正文或卖点，支持换行'], ['detail', '补充信息（可留空）', 2, '仅填写需求方提供的型号、价格或说明']]) {
+      const input = el('textarea'); input.id = `copy-${asset.id}-${field}`; input.dataset.field = field; input.rows = rows; input.value = asset.copy[field] || ''; input.placeholder = hint;
       const caption = el('label', 'field-label', label); caption.htmlFor = input.id;
       input.oninput = () => { asset.copy[field] = input.value; input.removeAttribute('aria-invalid'); invalidate(`图片 ${index + 1} 的文案已修改，请重新生成并确认。`); changed(); };
       card.append(caption, input);
@@ -218,10 +218,8 @@ function renderAssets() {
 }
 async function compose() {
   if (!approved()) { go('analyze'); throw new Error('请先确认规范。'); }
-  if (!project.assets.length) throw new Error('请添加未排版的商品图片和文案。');
+  if (!project.assets.length) throw new Error('请添加未排版的商品图片。文案只排入你提供的内容，可留空。');
   if (project.assets.length > MAX_ASSETS) throw new Error('每套最多 20 张图片，请删除多余素材或拆分项目。');
-  const missing = project.assets.findIndex(asset => !String(asset.copy?.title || '').trim());
-  if (missing >= 0) { const input = $('#assetList').children[missing].querySelector('[data-field="title"]'); input.setAttribute('aria-invalid', 'true'); input.scrollIntoView({ block: 'center' }); throw new Error(`请填写图片 ${missing + 1}「${project.assets[missing].name}」的标题。`); }
   const { tokens } = parseDesignMd(project.md), measure = textMeasurer();
   invalidate('正在按图片比例与模块槽位匹配排版…');
   const boards = [], reports = [], pendingPreviews = new Map();

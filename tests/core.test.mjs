@@ -79,7 +79,7 @@ test('MD parameter changes actually affect generated nodes',()=>{
   const a=board(),tokens=parseDesignMd(md('#112233','split')).tokens,b=board('stack',1080,1350,{tokens});assert.notEqual(a.nodes[0].color,b.nodes[0].color);assert.notEqual(a.nodes.at(-1).x,b.nodes.at(-1).x);
 });
 test('invalid and excessive input fails rather than truncating',()=>{
-  assert.throws(()=>board('stack',1080,1350,{copy:{title:''}}),/标题/);assert.throws(()=>board('stack',1080,1350,{copy:{title:'长'.repeat(15000)}}),/未被删减/);assert.throws(()=>board('stack',200,200),/320/);
+  const imageOnly=board('stack',1080,1350,{copy:{title:'',body:'',detail:''}});assert.equal(imageOnly.nodes.some(n=>n.type==='TEXT'),false);assert.throws(()=>board('stack',1080,1350,{copy:{title:'长'.repeat(15000)}}),/未被删减/);assert.throws(()=>board('stack',200,200),/320/);
 });
 test('validation rejects tampered text, ratio, hash, bounds and overlap',()=>{
   const b=board();b.nodes[1].characters='wrong';b.nodes.at(-1).hash='wrong';b.nodes.at(-1).x=-30;assert.equal(validateBoard(b,asset).ok,false);
@@ -100,6 +100,18 @@ test('STEP3 actually uses A+ image and text slots instead of generic stack',()=>
   const original={...asset,width:1800,height:1000},result=board('stack',1500,615,{asset:original,tokens:moduleTokens(),copy:{title:'HIGH QUALITY KEYCAPS'}});
   const title=result.nodes.find(n=>n.role==='title'),image=result.nodes.find(n=>n.type==='IMAGE');
   assert.ok(Math.abs(title.x-1005)<1e-8);assert.equal(title.width,450);assert.ok(image.x+image.width<=930.01);assert.equal(result.layoutMatch.moduleId,'left-photo');assert.equal(validateBoard(result,original).ok,true);
+});
+
+test('reference required text slots never force new copy; provided text remains exact and adaptive',()=>{
+  const tokens=moduleTokens();tokens.aPlus.modules[0].template.textSlots=[
+    {id:'title',role:'headline',bbox:{x:.65,y:.1,width:.32,height:.24},required:true,maxLines:1},
+    {id:'body',role:'body',bbox:{x:.65,y:.4,width:.32,height:.3},required:true}
+  ];
+  const result=board('stack',1500,615,{tokens,copy:{title:'BUYER COPY',body:'',detail:''}});
+  assert.deepEqual(result.nodes.filter(n=>n.type==='TEXT').map(n=>n.characters),['BUYER COPY']);
+  assert.equal(validateBoard(result,asset).ok,true);
+  const noCopy=board('stack',1500,615,{tokens,copy:{title:'',body:'',detail:''}});
+  assert.equal(noCopy.nodes.some(n=>n.type==='TEXT'),false);
 });
 
 test('matching uses actual uploaded aspect ratio, not upload order or filename',()=>{
