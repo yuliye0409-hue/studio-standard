@@ -64,3 +64,78 @@ test('validation rejects tampered text, ratio, hash, bounds and overlap',()=>{
   const b=board();b.nodes[1].characters='wrong';b.nodes.at(-1).hash='wrong';b.nodes.at(-1).x=-30;assert.equal(validateBoard(b,asset).ok,false);
   const c=board();c.nodes.at(-1).x=c.nodes[1].x;c.nodes.at(-1).y=c.nodes[1].y;assert.match(validateBoard(c,asset).errors.join(),/重叠/);
 });
+
+const moduleSpec=(id,image,text)=>({id,order:1,type:'image-text-split',source:'vision',confidence:.95,sourceCanvas:{width:1500,height:615},x:0,y:0,width:1,height:1,template:{imageSlots:[{id:'photo',role:'product',bbox:image}],textSlots:[{id:'heading',role:'headline',bbox:text,required:true}]}});
+const moduleTokens=()=>({...parseDesignMd(md()).tokens,aPlus:{modules:[moduleSpec('left-photo',{x:.03,y:.1,width:.59,height:.8},{x:.67,y:.2,width:.3,height:.5})]}});
+
+test('1500x615 wide uploaded image fits with large reference margins without losing copy',()=>{
+  const tokens=parseDesignMd(md()).tokens;tokens.layout.padding=.18;tokens.layout.imageFraction=.72;
+  const original={...asset,name:'RGB1.png',width:2928,height:1200};
+  const result=board('stack',1500,615,{asset:original,tokens,copy:{title:'HIGH QUALITY KEYCAPS',body:'',detail:''}});
+  assert.equal(validateBoard(result,original).ok,true);assert.equal(result.nodes.find(n=>n.type==='TEXT').characters,'HIGH QUALITY KEYCAPS');
+});
+
+test('STEP3 actually uses A+ image and text slots instead of generic stack',()=>{
+  const original={...asset,width:1800,height:1000},result=board('stack',1500,615,{asset:original,tokens:moduleTokens(),copy:{title:'HIGH QUALITY KEYCAPS'}});
+  const title=result.nodes.find(n=>n.role==='title'),image=result.nodes.find(n=>n.type==='IMAGE');
+  assert.ok(Math.abs(title.x-1005)<1e-8);assert.equal(title.width,450);assert.ok(image.x+image.width<=930.01);assert.equal(result.layoutMatch.moduleId,'left-photo');assert.equal(validateBoard(result,original).ok,true);
+});
+
+test('matching uses actual uploaded aspect ratio, not upload order or filename',()=>{
+  const tokens=moduleTokens();tokens.aPlus.modules.push(moduleSpec('portrait-photo',{x:.03,y:.1,width:.15,height:.8},{x:.67,y:.2,width:.3,height:.5}));
+  const wide=board('stack',1500,615,{asset:{...asset,width:2400,height:800},tokens,copy:{title:'Wide'}});
+  const portrait=board('stack',1500,615,{asset:{...asset,name:'same-name.png',width:400,height:900},tokens,copy:{title:'Portrait'}});
+  assert.equal(wide.layoutMatch.moduleId,'left-photo');assert.equal(portrait.layoutMatch.moduleId,'portrait-photo');
+  const manual=board('stack',1500,615,{asset:{...asset,width:400,height:900},tokens,copy:{title:'Portrait'},moduleKey:'0:left-photo'});
+  assert.equal(manual.layoutMatch.moduleId,'left-photo');
+});
+
+test('module text fields and original bytes stay mapped through native editable nodes',()=>{
+  const tokens=moduleTokens();tokens.aPlus.modules[0].template.textSlots=[{id:'title',role:'headline',bbox:{x:.65,y:.1,width:.32,height:.2},required:true},{id:'body',role:'body',bbox:{x:.65,y:.35,width:.32,height:.3}},{id:'detail',role:'price',bbox:{x:.65,y:.75,width:.32,height:.15}}];
+  const result=board('stack',1500,615,{tokens,copy:{title:'KEYCAPS',body:'中文 English\n100%  空格',detail:'Model A'}});
+  assert.equal(result.layoutMatch.kind,'module');assert.equal(validateBoard(result,asset).ok,true);
+  for(const field of ['title','body','detail'])assert.equal(result.nodes.find(n=>n.role===field).characters,result.copy[field]);
+  assert.equal(result.nodes.find(n=>n.type==='IMAGE').hash,asset.hash);
+});
+
+test('auto matching tries a fitting text slot and never hides genuine module overflow',()=>{
+  const tokens=moduleTokens();tokens.aPlus.modules[0].template.textSlots[0].bbox.height=.001;
+  assert.throws(()=>board('stack',1500,615,{tokens,copy:{title:'KEYCAPS'}}),/没有可容纳.*槽位/);
+  tokens.aPlus.modules.push(moduleSpec('fits',{x:.03,y:.1,width:.59,height:.8},{x:.67,y:.2,width:.3,height:.5}));
+  assert.equal(board('stack',1500,615,{tokens,copy:{title:'KEYCAPS'}}).layoutMatch.moduleId,'fits');
+  assert.throws(()=>board('stack',1500,615,{tokens,copy:{title:'KEYCAPS'},moduleKey:'0:left-photo'}),/文案未被删减/);
+  assert.throws(()=>board('stack',1500,615,{tokens,copy:{title:'KEYCAPS',body:'must retain'}}),/缺少正文槽位/);
+});
+
+test('missing geometry, low confidence and multi-image modules are not presented as successful reuse',()=>{
+  for(const kind of ['missing','low','multiple']){const tokens=moduleTokens(),m=tokens.aPlus.modules[0];if(kind==='missing')m.template.imageSlots=[];if(kind==='low')m.confidence=.2;if(kind==='multiple')m.template.imageSlots.push({...m.template.imageSlots[0],id:'second'});const result=board('stack',1500,615,{tokens,copy:{title:'KEYCAPS'}});assert.equal(result.layoutMatch.kind,'generic');assert.ok(result.warnings.some(x=>x.includes('通用版式')));}
+});
+
+test('reference-declared photo/text overlays render image behind text; tampered geometry still fails',()=>{
+  const tokens=moduleTokens();tokens.aPlus.modules[0].template.imageSlots[0].bbox={x:0,y:0,width:1,height:1};
+  const original={...asset,width:1500,height:615},result=board('stack',1500,615,{asset:original,tokens,copy:{title:'KEYCAPS'}});
+  assert.equal(result.layoutMatch.kind,'module');assert.equal(result.nodes[1].type,'IMAGE');assert.equal(validateBoard(result,original).ok,true);
+  result.nodes.find(n=>n.type==='TEXT').x=0;assert.match(validateBoard(result,original).errors.join(),/槽位/);
+});
+
+test('brand logo gets a free position without hiding reference-slot text or the product',()=>{
+  const original={...asset,width:2928,height:1200},tokens=moduleTokens(),brandLogo={id:'logo',name:'brand.png',hash:'logo-hash',width:320,height:80};
+  const result=board('stack',1500,615,{asset:original,tokens,brandLogo,copy:{title:'HIGH QUALITY KEYCAPS'}});
+  assert.equal(result.layoutMatch.kind,'module');assert.equal(validateBoard(result,original).ok,true);
+  const logo=result.nodes.find(n=>n.role==='brand-logo'),title=result.nodes.find(n=>n.role==='title');logo.x=title.x;logo.y=title.y;
+  assert.match(validateBoard(result,original).errors.join(),/重叠/);
+});
+
+test('wide generic banner accommodates logo plus all three copy fields without corrupting dimensions',()=>{
+  const tokens=parseDesignMd(md()).tokens;tokens.layout.padding=.18;tokens.layout.imageFraction=.72;
+  const original={...asset,width:2928,height:1200},brandLogo={id:'logo',name:'brand.png',hash:'logo-hash',width:320,height:80};
+  const result=board('stack',1500,615,{asset:original,tokens,brandLogo,copy:{title:'HIGH QUALITY KEYCAPS',body:'Original content. No crop.',detail:'Model A'}});
+  assert.equal(validateBoard(result,original).ok,true);assert.deepEqual([result.width,result.height],[1500,615]);assert.ok(result.warnings.some(s=>s.includes('重新分配')));
+});
+
+test('analysis MD round trip keeps reference dimensions and drives actual slot placement',()=>{
+  const ref={...reference([230,80,90]),width:1500,height:7995,aPlusModules:[{type:'image-text-split',bbox:[0,.2,1,.077],confidence:.95,imageSlots:[{role:'product',bbox:[.02,.1,.6,.8]}],textSlots:[{role:'headline',bbox:[.67,.1,.3,.8]}]}]};
+  const analysisMd=buildAnalysisMd([ref],'Round trip'),tokens=parseDesignMd(analysisMd).tokens;
+  assert.deepEqual(tokens.aPlus.modules[0].sourceCanvas,{width:1500,height:7995});
+  const result=board('stack',1500,615,{tokens,copy:{title:'KEYCAPS'}});assert.equal(result.layoutMatch.kind,'module');assert.ok(Math.abs(result.nodes.find(n=>n.role==='title').x-1005)<1e-8);
+});

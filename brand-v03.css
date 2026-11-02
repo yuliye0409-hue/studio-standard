@@ -33,3 +33,7 @@
 .evidence-copy p{font-size:10px;color:var(--muted);margin:4px 0 0;overflow-wrap:anywhere}
 .evidence-row select{font-size:11px;padding:8px;min-width:0}
 @media(max-width:600px){.brand-upload-grid{grid-template-columns:1fr}.evidence-row{grid-template-columns:1fr;gap:7px}}
+.asset-card select{max-width:100%;width:100%;margin-bottom:8px}
+.asset-layout-result,.board-layout-match{overflow-wrap:anywhere}
+.board-layout-match{padding:0 14px;margin:0 0 12px}
+.asset-layout-error{color:#b42318;background:#fff0ee;border:1px solid #f7b7ae;border-radius:8px;padding:10px;font-size:12px;line-height:1.6;overflow-wrap:anywhere}

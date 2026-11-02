@@ -1,4 +1,4 @@
-import { SCHEMA, uid, safeName, parseDesignMd, buildAnalysisMd, buildDesignSystem, extractLayoutEvidence, composeBoard, validateBoard } from './lib/core.js';
+import { SCHEMA, uid, safeName, parseDesignMd, buildAnalysisMd, buildDesignSystem, extractLayoutEvidence, composeBoard, validateBoard, layoutModules } from './lib/core.js';
 import { readFiles, readDataUrl, makeAsset, analyzeAsset, resolveFonts, textMeasurer, renderBoard, figmaImage, sha256 } from './lib/media.js';
 import { saveProject, listProjects } from './lib/storage.js';
 
@@ -9,6 +9,7 @@ const MAX_ASSETS = 20;
 const fresh = () => ({ schema: SCHEMA, id: uid(), name: '我的设计项目', updatedAt: new Date().toISOString(), references: [], assets: [], brand: { logo: null, fonts: [] }, md: '', approvedMd: '', history: [], boards: [], reviewedBoards: [], reports: [], visualAnalysis: null, canvas: { width: 1080, height: 1350 } });
 let project, currentView = 'overview', previews = new Map(), saveTimer, busy = false;
 let serverStatus = null;
+const compositionErrors = new Map();
 function boardAssets() { return project.brand?.logo ? [...project.assets, project.brand.logo] : project.assets; }
 async function loadBrandFonts() {
   if (!project.brand?.fonts?.length) { document.querySelector('#brand-fonts')?.remove(); return; }
@@ -44,7 +45,7 @@ async function persist() {
   try { await saveProject(project); $('#saveStatus').textContent = '已保存至本机'; } catch { $('#saveStatus').textContent = '保存失败，请备份'; throw new Error('本地存储失败（可能空间不足）。请立即备份项目 JSON。'); }
 }
 function changed() { $('#saveStatus').textContent = '有未保存更改'; clearTimeout(saveTimer); saveTimer = setTimeout(() => persist().catch(fail), 500); }
-function invalidate(reason) { project.boards = []; project.reviewedBoards = []; project.reports = []; previews.clear(); renderBoards(); renderReport(); $('#composeStatus').textContent = reason || ''; }
+function invalidate(reason) { project.boards = []; project.reviewedBoards = []; project.reports = []; previews.clear(); compositionErrors.clear(); $$('.asset-layout-error').forEach(n => n.remove()); $$('.asset-layout-result').forEach(n => n.remove()); renderBoards(); renderReport(); $('#composeStatus').textContent = reason || ''; }
 function progress(message) { $('#analysisProgress').classList.remove('hidden'); $('#analysisProgress').textContent = message; }
 function approved() { return !!project.md && project.md === project.approvedMd; }
 function renderGate() { $('#composeGate').textContent = approved() ? '规范已确认。原图完整显示；标题、正文、补充信息逐字保留。' : '请先生成或导入 DESIGN.md，并确认规范。'; $('#composeGate').classList.toggle('ok', approved()); }
@@ -58,7 +59,8 @@ function renderSpec() {
       for (const [key, color] of Object.entries(tokens.colors)) { if (key === 'muted') continue; const chip = el('span', 'token-chip'); const dot = el('i'); dot.style.background = color; chip.append(dot, el('span', '', key + ' ' + color)); container.append(chip); }
       if (tokens.aPlus?.modules?.length) {
         const moduleChip = el('span', 'token-chip');
-        moduleChip.append(el('span', '', `A+ 模块 ${tokens.aPlus.modules.length} 个 · 可复用槽位已生成`));
+        const reusable = layoutModules(tokens).filter(c => !c.reason && c.module.confidence >= .6).length;
+        moduleChip.append(el('span', '', `A+ 模块 ${tokens.aPlus.modules.length} 个 · 可自动匹配 ${reusable} 个`));
         container.append(moduleChip);
       }
       $('#specWarnings').textContent = warnings.join(' ') || '修改后的 MD 会真实影响配色、字体、间距和布局。';
@@ -66,7 +68,7 @@ function renderSpec() {
   } catch (error) { $('#specWarnings').textContent = error.message; }
   renderEvidence();
   renderBrand();
-  renderHistory(); renderGate();
+  renderHistory(); renderGate(); renderAssets();
 }
 function renderEvidence() {
   const container = $('#evidenceList'); if (!container) return; container.replaceChildren();
@@ -202,6 +204,7 @@ async function analyze() {
 }
 function renderAssets() {
   const list = $('#assetList'); list.replaceChildren();
+  let modules = []; try { if (project.md) modules = layoutModules(parseDesignMd(project.md).tokens); } catch { /* Invalid MD is reported by the specification editor. */ }
   $('#assetCount').textContent = `${project.assets.length} / ${MAX_ASSETS} 张`;
   $('#assetInput').disabled = project.assets.length >= MAX_ASSETS;
   $('#assetEmpty').classList.toggle('hidden', project.assets.length > 0);
@@ -210,6 +213,14 @@ function renderAssets() {
     const card = el('article', 'asset-card'); card.dataset.assetId = asset.id;
     const heading = el('div', 'asset-card-heading'), image = el('img'); image.src = asset.dataUrl; image.alt = asset.name;
     const meta = el('div'); meta.append(el('h3', '', `图片 ${index + 1} · ${asset.name}`), el('p', 'fine-print', `${asset.width} × ${asset.height}px · 原图完整保留`)); heading.append(image, meta); card.append(heading);
+    const select = el('select'); select.dataset.field = 'layout'; select.id = `layout-${asset.id}`; select.setAttribute('aria-label', `图片 ${index + 1} 的版式匹配`);
+    for (const [value, label, disabled] of [['auto', '自动匹配 · 按原图比例与槽位容量', false], ['generic', '通用版式 · 不复用参考槽位', false], ...modules.map(c => [c.key, c.label + (c.reason ? `（不可用：${c.reason}）` : ''), Boolean(c.reason)])]) { const option = el('option', '', label); option.value = value; option.disabled = disabled; select.append(option); }
+    if (asset.layoutModuleKey && ![...select.options].some(o => o.value === asset.layoutModuleKey)) { const option = el('option', '', '原模块已变化，请重新选择'); option.value = asset.layoutModuleKey; select.append(option); }
+    select.value = asset.layoutModuleKey || 'auto'; select.onchange = () => { asset.layoutModuleKey = select.value; invalidate('版式匹配已改变，请重新生成并检查。'); changed(); };
+    const layoutLabel = el('label', 'field-label', '匹配参考版式'); layoutLabel.htmlFor = select.id; card.append(layoutLabel, select);
+    const match = project.boards.find(b => b.assetId === asset.id)?.layoutMatch;
+    if (match) card.append(el('p', 'fine-print asset-layout-result', match.kind === 'module' ? `已匹配：${match.label} · 原图槽位利用率 ${Math.round(match.imageFit * 100)}%` : `${match.label}：${match.reason}`));
+    if (compositionErrors.has(asset.id)) { const error = el('p', 'asset-layout-error', compositionErrors.get(asset.id)); error.setAttribute('role', 'alert'); card.append(error); }
     for (const [field, label, rows, hint] of [['title', '标题 · 必填', 2, '填写这张图片的标题'], ['body', '正文 / 卖点', 4, '填写这张图片的卖点，支持换行'], ['detail', '补充信息', 2, '型号、价格、说明等；可留空']]) {
       const input = el('textarea'); input.id = `copy-${asset.id}-${field}`; input.dataset.field = field; input.rows = rows; input.value = asset.copy[field] || ''; input.placeholder = hint; input.required = field === 'title';
       const caption = el('label', 'field-label', label); caption.htmlFor = input.id;
@@ -230,6 +241,7 @@ async function compose() {
   const missing = project.assets.findIndex(asset => !String(asset.copy?.title || '').trim());
   if (missing >= 0) { const input = $('#assetList').children[missing].querySelector('[data-field="title"]'); input.setAttribute('aria-invalid', 'true'); input.scrollIntoView({ block: 'center' }); throw new Error(`请填写图片 ${missing + 1}「${project.assets[missing].name}」的标题。`); }
   const { tokens } = parseDesignMd(project.md), measure = textMeasurer();
+  invalidate('正在按图片比例与模块槽位匹配排版…');
   const boards = [], reports = [], pendingPreviews = new Map();
   await document.fonts.load('600 40px Inter'); await document.fonts.load('400 24px Inter');
   for (const [index, asset] of project.assets.entries()) {
@@ -238,14 +250,16 @@ async function compose() {
     const brandFamily = project.brand?.fonts?.[0]?.family;
     if (brandFamily) { effectiveTokens.typography.title.family = brandFamily; effectiveTokens.typography.body.family = brandFamily; }
     const fonts = await resolveFonts(effectiveTokens, Object.values(asset.copy).join(''));
-    const board = composeBoard({ asset, copy: asset.copy, tokens: effectiveTokens, ...project.canvas, measure, fonts, brandLogo: project.brand?.logo, id: uid() });
+    let board;
+    try { board = composeBoard({ asset, copy: asset.copy, tokens: effectiveTokens, ...project.canvas, measure, fonts, brandLogo: project.brand?.logo, id: uid(), moduleKey: asset.layoutModuleKey || 'auto', assetIndex: index }); }
+    catch (error) { compositionErrors.set(asset.id, error.message); $('#composeStatus').textContent = `图片 ${index + 1}「${asset.name}」未生成，请检查该图的版式匹配说明。`; renderAssets(); $('#assetList').querySelector(`[data-asset-id="${asset.id}"]`)?.scrollIntoView({ block: 'nearest' }); throw error; }
     board.mdHash = await sha256('data:text/plain;base64,' + btoa(unescape(encodeURIComponent(project.md))));
     if (brandFamily) board.warnings.push(`品牌字体已锁定为 ${brandFamily}；Figma 端需安装同名字体。`);
     for (const role of ['title', 'body']) if (!tokens.typography[role].family.split(',').map(s => s.replace(/['"]/g, '').trim()).includes(fonts[role])) board.warnings.push(`字体替换：${tokens.typography[role].family} → ${fonts[role]}。`);
     const report = validateBoard(board, asset); if (!report.ok) throw new Error(report.errors.join('\n'));
     const rendered = await renderBoard(board, boardAssets()); pendingPreviews.set(board.id, rendered.dataUrl); boards.push(board); reports.push(report);
   }
-  project.boards = boards; project.reviewedBoards = []; project.reports = reports; previews = pendingPreviews; renderBoards(); renderReport(); await persist();
+  project.boards = boards; project.reviewedBoards = []; project.reports = reports; previews = pendingPreviews; compositionErrors.clear(); renderBoards(); renderAssets(); renderReport(); await persist();
   $('#composeStatus').textContent = `已生成 ${boards.length} 张作品。请放大检查每张图，逐张勾选确认后导出。`; toast('排版完成，请逐张确认图文与排版。');
 }
 function allReviewed() { return approved() && project.boards.length > 0 && project.boards.length === project.assets.length && project.boards.every(board => project.reviewedBoards?.includes(board.id)); }
@@ -265,6 +279,7 @@ function renderBoards() {
     button.onclick = () => { $('#largePreview').src = previews.get(board.id); $('#imageDialog').showModal(); };
     const caption = el('div', 'board-caption'), download = el('button', 'text-link', 'PNG ↓'); download.onclick = () => task(download, async () => { ensureExportable(); const result = await renderBoard(board, boardAssets()); downloadBlob(result.blob, `${String(index + 1).padStart(2, '0')}-${safeName(board.name)}.png`); });
     caption.append(el('strong', '', board.copy.title), download); card.append(button, caption);
+    if (board.layoutMatch) card.append(el('p', 'fine-print board-layout-match', `${board.width} × ${board.height}px · ${board.layoutMatch.label}${board.layoutMatch.kind === 'generic' ? ' · ' + board.layoutMatch.reason : ''}`));
     const review = el('label', 'board-review'), checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.checked = project.reviewedBoards?.includes(board.id) || false;
     checkbox.onchange = () => { project.reviewedBoards = (project.reviewedBoards || []).filter(id => id !== board.id); if (checkbox.checked) project.reviewedBoards.push(board.id); renderReview(); changed(); };
     review.append(checkbox, document.createTextNode(`第 ${index + 1} 张 · 已检查图文和排版`)); card.append(review);
@@ -320,11 +335,12 @@ async function showProjects() {
 }
 async function useProject(value) {
   project = value;
+  compositionErrors.clear();
   project.assets = (Array.isArray(project.assets) ? project.assets : []).map(asset => ({ ...asset, copy: { title: '', body: '', detail: '', ...(asset.copy || {}) } }));
   project.reviewedBoards = Array.isArray(project.reviewedBoards) ? project.reviewedBoards : [];
   previews.clear();
   $('#projectMenuBtn').replaceChildren(document.createTextNode(project.name + ' '), el('span', '', '⌄'));
-  $('#canvasWidth').value = project.canvas.width; $('#canvasHeight').value = project.canvas.height;
+  $('#canvasWidth').value = project.canvas.width; $('#canvasHeight').value = project.canvas.height; syncCanvasPreset();
   renderReferences(); renderAssets(); renderSpec();
   await loadBrandFonts(); renderBrand();
   for (const board of project.boards) { try { const result = await renderBoard(board, boardAssets()); previews.set(board.id, result.dataUrl); } catch { invalidate('历史素材缺失，请重新生成。'); break; } }
@@ -347,6 +363,14 @@ async function loadSop() {
   for (const block of text.split(/\n\n+/)) { if (!block.trim()) continue; if (block.startsWith('# ')) continue; const tag = block.startsWith('## ') ? 'h2' : block.startsWith('### ') ? 'h3' : 'p'; const node = el(tag, '', block.replace(/^#{2,3} /, '').replace(/`/g, '')); node.style.whiteSpace = 'pre-wrap'; container.append(node); }
 }
 
+function syncCanvasPreset() {
+  const preset = $('#sizePreset'), value = `${project.canvas.width}x${project.canvas.height}`;
+  let custom = preset.querySelector('option[value="custom"]');
+  if (!custom) { custom = el('option'); custom.value = 'custom'; preset.append(custom); }
+  custom.textContent = `自定义 · ${project.canvas.width} × ${project.canvas.height}px`;
+  preset.value = [...preset.options].some(o => o.value === value) ? value : 'custom';
+}
+
 function wire() {
   $$('[data-view]').forEach(n => n.onclick = e => { e.preventDefault(); go(n.dataset.view); });
   $('#referenceInput').onchange = e => task($('#analyzeBtn'), async () => { await uploadReferences([...e.target.files]); e.target.value = ''; });
@@ -364,8 +388,8 @@ function wire() {
   $('#downloadMdBtn').onclick = () => { try { parseDesignMd(project.md); downloadText(project.md, 'DESIGN.md'); } catch (e) { fail(e); } };
   $('#assetInput').onchange = e => task($('#composeBtn'), async () => { try { const files = [...e.target.files]; if (!files.length) return; if (project.assets.length + files.length > MAX_ASSETS) throw new Error(`每套最多 20 张图片，当前 ${project.assets.length} 张，还能添加 ${MAX_ASSETS - project.assets.length} 张。本次未添加任何图片。`); const added = await readFiles(files, 'asset'); added.forEach(a => { a.copy = { title: '', body: '', detail: '' }; }); project.assets.push(...added); invalidate('图片已添加，请逐张填写对应文案。'); renderAssets(); await persist(); } finally { e.target.value = ''; } });
 
-  for (const id of ['canvasWidth', 'canvasHeight']) $('#' + id).onchange = () => { project.canvas = { width: Number($('#canvasWidth').value), height: Number($('#canvasHeight').value) }; invalidate('画布尺寸已改变，请重新生成。'); changed(); };
-  $('#sizePreset').onchange = e => { const [width, height] = e.target.value.split('x').map(Number); project.canvas = { width, height }; $('#canvasWidth').value = width; $('#canvasHeight').value = height; invalidate('画布尺寸已改变，请重新生成。'); changed(); };
+  for (const id of ['canvasWidth', 'canvasHeight']) $('#' + id).onchange = () => { project.canvas = { width: Number($('#canvasWidth').value), height: Number($('#canvasHeight').value) }; syncCanvasPreset(); invalidate('画布尺寸已改变，请重新生成。'); changed(); };
+  $('#sizePreset').onchange = e => { if (e.target.value === 'custom') return; const [width, height] = e.target.value.split('x').map(Number); project.canvas = { width, height }; $('#canvasWidth').value = width; $('#canvasHeight').value = height; syncCanvasPreset(); invalidate('画布尺寸已改变，请重新生成。'); changed(); };
 
   $('#composeBtn').onclick = () => task($('#composeBtn'), compose);
   $('#finishReviewBtn').onclick = () => task($('#finishReviewBtn'), async () => { ensureExportable(); await persist(); go('export'); });
