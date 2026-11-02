@@ -1,5 +1,5 @@
 import { SCHEMA, uid, safeName, parseDesignMd, buildAnalysisMd, buildDesignSystem, extractLayoutEvidence, composeBoard, validateBoard, layoutModules } from './lib/core.js';
-import { readFiles, readDataUrl, makeAsset, analyzeAsset, resolveFonts, textMeasurer, renderBoard, figmaImage, sha256 } from './lib/media.js';
+import { readFiles, readDataUrl, makeAsset, analyzeAsset, prepareVisionReference, resolveFonts, textMeasurer, renderBoard, figmaImage, sha256 } from './lib/media.js';
 import { saveProject, listProjects } from './lib/storage.js';
 
 const $ = selector => document.querySelector(selector);
@@ -47,11 +47,12 @@ async function persist() {
 function changed() { $('#saveStatus').textContent = '有未保存更改'; clearTimeout(saveTimer); saveTimer = setTimeout(() => persist().catch(fail), 500); }
 function invalidate(reason) { project.boards = []; project.reviewedBoards = []; project.reports = []; previews.clear(); compositionErrors.clear(); $$('.asset-layout-error').forEach(n => n.remove()); $$('.asset-layout-result').forEach(n => n.remove()); renderBoards(); renderReport(); $('#composeStatus').textContent = reason || ''; }
 function progress(message) { $('#analysisProgress').classList.remove('hidden'); $('#analysisProgress').textContent = message; }
-function approved() { return !!project.md && project.md === project.approvedMd; }
-function renderGate() { $('#composeGate').textContent = approved() ? '规范已确认。原图完整显示；标题、正文、补充信息逐字保留。' : '请先生成或导入 DESIGN.md，并确认规范。'; $('#composeGate').classList.toggle('ok', approved()); }
+function needsReanalysis() { try { return !!project.md && parseDesignMd(project.md).requiresReanalysis; } catch { return false; } }
+function approved() { return !!project.md && project.md === project.approvedMd && !needsReanalysis(); }
+function renderGate() { $('#composeGate').textContent = approved() ? '规范已确认。原图完整显示；标题、正文、补充信息逐字保留。' : (needsReanalysis() ? '旧规范包含本地识别结果，请先用视觉模型重新分析参考图。' : '请先生成或导入 DESIGN.md，并确认规范。'); $('#composeGate').classList.toggle('ok', approved()); }
 function renderSpec() {
   $('#mdEditor').value = project.md;
-  $('#mdStatus').textContent = project.md ? (approved() ? '已确认 · 可用于排版' : '待确认 · 修改参数后请重新确认') : '尚未生成或导入规范';
+  $('#mdStatus').textContent = project.md ? (approved() ? '已确认 · 可用于排版' : (needsReanalysis() ? '旧规范需视觉模型重新分析' : '待确认 · 修改参数后请重新确认')) : '尚未生成或导入规范';
   const container = $('#tokenPreview'); container.replaceChildren();
   try {
     if (project.md) {
@@ -73,18 +74,19 @@ function renderSpec() {
 function renderEvidence() {
   const container = $('#evidenceList'); if (!container) return; container.replaceChildren();
   const roles = [['headline','标题'],['body','正文'],['price','价格/规格'],['product','商品候选'],['decorative','装饰'],['unknown','待确认']];
-  const sources = { ocr: '文字识别', vision: '视觉模型', 'pixel-occupancy': '图像区域测量', inferred: '系统推断' };
-  const refs = project.references.filter(r => r.evidence?.elements?.length);
-  if (!refs.length) { container.append(el('p', 'fine-print', '分析参考图后，这里会列出识别到的文字和图像区域。')); return; }
-  refs.forEach(ref => { const section = el('div', 'evidence-reference'); section.append(el('strong', '', ref.name)); for (const item of ref.evidence.elements) {
+  const sources = { vision: '视觉模型' };
+  const refs = needsReanalysis() ? [] : project.references.filter(r => r.evidence?.elements?.some(item => item.bbox?.source === 'vision'));
+  if (!refs.length) { container.append(el('p', 'fine-print', needsReanalysis() ? '旧文字识别结果已停用。原图和文案保留，请重新进行视觉模型分析。' : '模型分析后，这里会显示标题、正文和商品区域及其判断依据；不复制参考图文字。')); return; }
+  refs.forEach(ref => { const section = el('div', 'evidence-reference'); section.append(el('strong', '', ref.name)); for (const item of ref.evidence.elements.filter(item => item.bbox?.source === 'vision')) {
     const row = el('div', 'evidence-row'), copy = el('div', 'evidence-copy'), select = document.createElement('select');
-    const title = item.text?.trim() ? `识别文字：${item.text.trim()}` : item.role === 'product' ? '图像区域候选' : '未识别到文字内容';
+    const title = `视觉区域：${roles.find(([value]) => value === item.role)?.[1] || '待确认'}`;
     const source = item.bbox?.source || item.source || 'unknown', confidence = Math.round((Number(item.bbox?.confidence) || 0) * 100);
     row.dataset.elementId = item.id;
     copy.append(el('strong', '', title), el('p', 'evidence-source', `来源：${sources[source] || source} · 置信度：${confidence}%`));
+    if (item.bbox.reason) copy.append(el('p', 'fine-print', item.bbox.reason));
     roles.forEach(([value, label]) => { const option = el('option', '', label); option.value = value; option.selected = item.role === value; select.append(option); });
     select.className = 'evidence-role-select'; select.setAttribute('aria-label', `识别用途：${title}`);
-    select.onchange = () => { item.role = select.value; project.md = buildAnalysisMd(project.references, project.name, project.analysisMode || 'local', project.visualAnalysis); project.approvedMd = ''; invalidate('证据角色已调整，请重新确认规范。'); renderSpec(); changed(); };
+    select.onchange = () => { item.role = select.value; project.md = buildAnalysisMd(project.references, project.name, 'vision', project.visualAnalysis); project.approvedMd = ''; invalidate('证据角色已调整，请重新确认规范。'); renderSpec(); changed(); };
     row.append(copy, select); section.append(row);
   } container.append(section); });
 }
@@ -129,7 +131,7 @@ function renderReferences() {
   const list = $('#referenceList'); list.replaceChildren();
   for (const ref of project.references) {
     const row = el('div', 'reference-item'), image = el('img'); image.src = ref.dataUrl; image.alt = ref.name;
-    const desc = el('div'); desc.append(el('strong', '', ref.name), el('small', '', `${ref.width} × ${ref.height}${ref.analysis ? ' · 已测量' : ''}${ref.ocr ? ' · 已 OCR' : ''}`));
+    const desc = el('div'); desc.append(el('strong', '', ref.name), el('small', '', `${ref.width} × ${ref.height}${ref.analysis ? ' · 已测量' : ''}${ref.aPlusModules?.length ? ' · 已模型分析' : ''}`));
     const remove = el('button', '', '×'); remove.title = '移除参考图'; remove.onclick = async () => { if (busy) return; project.references = project.references.filter(r => r.id !== ref.id); project.approvedMd = ''; renderReferences(); renderGate(); changed(); toast('参考集已变化，请重新分析或重新确认现有规范。'); };
     row.append(image, desc, remove); list.append(row);
   }
@@ -147,61 +149,41 @@ async function api(path, data) {
   if (!response.ok) throw new Error(result.error || '请求失败。');
   return result;
 }
-async function scaledReference(ref, maximum = 2000) {
-  const { loadImage } = await import('./lib/media.js'); const image = await loadImage(ref.dataUrl); const factor = Math.min(1, maximum / Math.max(image.width, image.height));
-  const canvas = document.createElement('canvas'); canvas.width = Math.max(1, Math.round(image.width * factor)); canvas.height = Math.max(1, Math.round(image.height * factor));
-  const ctx = canvas.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-  return { dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height };
-}
 async function analyze() {
   if (!project.references.length) throw new Error('请先上传参考设计图片。');
-  const mode = $('#analysisMode').value;
   await refreshStatus();
   if (!serverStatus?.vision?.configured) {
-    if (mode === 'vision') {
-      $('#settingsDialog').showModal();
-      toast('尚未配置视觉模型。配置并保存后，重新点击“分析参考设计”。', true);
-      return;
-    }
-    const continueLocal = confirm('尚未配置视觉模型。继续将只使用本地像素测量和 OCR，长图模块边界、图文关系及语义识别可能不准确，生成的模块需要人工核对。\n\n确定：继续本地分析\n取消：打开视觉模型设置');
-    if (!continueLocal) { $('#settingsDialog').showModal(); return; }
+    $('#settingsDialog').showModal();
+    progress('请先配置视觉模型。原有规范和作品未改变。');
+    toast('请先配置支持图片输入的视觉模型，再分析参考图。不会使用本地文字识别替代。', true);
+    return;
   }
-  if (mode === 'vision') {
-    if (!confirm(`将向 ${serverStatus.vision.baseUrl} 发送本项目的 ${project.references.length} 张参考图用于分析，可能产生服务商费用。是否继续？`)) return;
-  }
-  const measured = [];
+  const measured = [], images = [], details = [];
   for (const [index, reference] of project.references.entries()) {
-    progress(`测量参考 ${index + 1}/${project.references.length}：${reference.name}`);
-    const ref = await analyzeAsset(reference);
-    if (mode === 'local') {
-      progress(`本地 OCR ${index + 1}/${project.references.length}：${reference.name}（中英文识别）`);
-      const image = await scaledReference(ref);
-      const ocr = await api('ocr', { dataUrl: image.dataUrl });
-      ocr.lines = ocr.lines.map(line => ({ ...line, relativeHeight: (line.bbox.y1 - line.bbox.y0) / image.height, centerX: (line.bbox.x0 + line.bbox.x1) / 2 / image.width, bbox: { x0: line.bbox.x0 * ref.width / image.width, y0: line.bbox.y0 * ref.height / image.height, x1: line.bbox.x1 * ref.width / image.width, y1: line.bbox.y1 * ref.height / image.height } }));
-      ref.ocr = ocr;
-    }
+    progress(`准备参考 ${index + 1}/${project.references.length}：${reference.name}`);
+    const { ocr, evidence, aPlusModules, ...original } = reference;
+    const ref = await analyzeAsset(original), prepared = await prepareVisionReference(ref);
     ref.evidence = extractLayoutEvidence(ref);
-    measured.push(ref);
+    measured.push(ref); images.push(prepared.overview);
+    if (prepared.tiles.length) details.push({ referenceIndex: index, tiles: prepared.tiles });
   }
-  let visual = null;
-  if (mode === 'vision') {
-    progress('视觉模型正在逐张识别模块边界、图文槽位与整套视觉规则…');
-    const images = [];
-    for (const ref of measured) images.push((await scaledReference(ref, 2400)).dataUrl);
-    visual = await api('vision', { images, evidence: measured.map(ref => ref.evidence) });
-    for (const [index, ref] of measured.entries()) {
-      const analyzed = visual.references[index];
-      ref.aPlusModules = analyzed.modules;
-      ref.evidence.elements.push(...analyzed.elements.map((item, itemIndex) => ({ id: `vision-${itemIndex + 1}`, role: item.role, text: '', bbox: { x: Number(item.bbox[0]), y: Number(item.bbox[1]), width: Number(item.bbox[2]), height: Number(item.bbox[3]), confidence: Number(item.confidence ?? .5), source: 'vision', reason: item.reason || '' } })));
-    }
+  const tileCount = details.reduce((sum, detail) => sum + detail.tiles.length, 0);
+  if (!confirm(`将向 ${serverStatus.vision.baseUrl} 发送 ${images.length} 张参考图总览${tileCount ? `和 ${tileCount} 张局部切片（辅助看清长图）` : ''}用于模型分析，可能产生服务商费用。是否继续？`)) { progress('已取消发送，原有规范未改变。'); return; }
+  progress('视觉模型正在识别整套风格、逐图模块边界和图文槽位…');
+  const visual = await api('vision', { images, details });
+  for (const [index, ref] of measured.entries()) {
+    const analyzed = visual.references[index];
+    ref.aPlusModules = analyzed.modules;
+    ref.evidence.elements = analyzed.elements.map((item, itemIndex) => ({ id: `vision-${itemIndex + 1}`, role: item.role, text: '', bbox: { x: Number(item.bbox[0]), y: Number(item.bbox[1]), width: Number(item.bbox[2]), height: Number(item.bbox[3]), confidence: Number(item.confidence ?? .5), source: 'vision', reason: item.reason || '' } }));
   }
-  project.references = measured;
-  project.analysisMode = mode; project.visualAnalysis = visual;
-  setMd(buildAnalysisMd(measured, project.name, mode, visual));
-  parseDesignMd(project.md);
-  await persist(); renderReferences(); progress('已根据真实参考生成规范。请检查推测项，确认后进入排版。');
-  toast('设计规范已生成，不含固定示例分析。');
+  const md = buildAnalysisMd(measured, project.name, 'vision', visual);
+  parseDesignMd(md);
+  project.references = measured; project.analysisMode = 'vision'; project.visualAnalysis = visual;
+  setMd(md);
+  await persist(); renderReferences(); progress('模型规范已生成。请核对模块、槽位和字体，再确认进入排版。');
+  toast('已使用视觉模型分析；未使用本地文字识别。');
 }
+
 function renderAssets() {
   const list = $('#assetList'); list.replaceChildren();
   let modules = []; try { if (project.md) modules = layoutModules(parseDesignMd(project.md).tokens); } catch { /* Invalid MD is reported by the specification editor. */ }
@@ -335,6 +317,12 @@ async function showProjects() {
 }
 async function useProject(value) {
   project = value;
+  if (needsReanalysis()) { project.approvedMd = ''; project.boards = []; project.reviewedBoards = []; project.reports = []; }
+  project.references = (project.references || []).map(reference => {
+    const { ocr, ...original } = reference;
+    if (original.analysis) original.evidence = extractLayoutEvidence(original);
+    return original;
+  });
   compositionErrors.clear();
   project.assets = (Array.isArray(project.assets) ? project.assets : []).map(asset => ({ ...asset, copy: { title: '', body: '', detail: '', ...(asset.copy || {}) } }));
   project.reviewedBoards = Array.isArray(project.reviewedBoards) ? project.reviewedBoards : [];
@@ -354,7 +342,7 @@ async function restore(file) {
     if (!/^data:image\/(png|jpeg|webp);base64,/.test(asset.dataUrl || '')) throw new Error('项目缺少有效原始图片。');
     if (await sha256(asset.dataUrl) !== asset.hash) throw new Error('备份素材校验不匹配。');
   }
-  const restored = { ...fresh(), id: uid(), name: String(imported.name || '恢复的项目') + ' · 恢复', references: imported.references, assets: imported.assets.map(asset => ({ ...asset, copy: { title: '', body: '', detail: '', ...(asset.copy || {}) } })), brand: imported.brand || { logo: null, fonts: [] }, md: String(imported.md || ''), analysisMode: imported.analysisMode || 'local', visualAnalysis: imported.visualAnalysis || null, canvas: imported.canvas || { width: 1080, height: 1350 }, approvedMd: '', boards: [], reports: [], history: [] };
+  const restored = { ...fresh(), id: uid(), name: String(imported.name || '恢复的项目') + ' · 恢复', references: imported.references, assets: imported.assets.map(asset => ({ ...asset, copy: { title: '', body: '', detail: '', ...(asset.copy || {}) } })), brand: imported.brand || { logo: null, fonts: [] }, md: String(imported.md || ''), analysisMode: imported.analysisMode || null, visualAnalysis: imported.visualAnalysis || null, canvas: imported.canvas || { width: 1080, height: 1350 }, approvedMd: '', boards: [], reports: [], history: [] };
   if (restored.md) parseDesignMd(restored.md);
   await useProject(restored); $('#projectDialog').close(); go('analyze'); toast('素材与文案已恢复，请重新确认规范后生成。');
 }
@@ -377,14 +365,14 @@ function wire() {
   for (const type of ['dragenter', 'dragover']) $('#referenceDropzone').addEventListener(type, e => { e.preventDefault(); $('#referenceDropzone').classList.add('dragging'); });
   for (const type of ['dragleave', 'drop']) $('#referenceDropzone').addEventListener(type, e => { e.preventDefault(); $('#referenceDropzone').classList.remove('dragging'); if (type === 'drop') task($('#analyzeBtn'), () => uploadReferences([...e.dataTransfer.files])); });
 
-  $('#analyzeBtn').onclick = () => task($('#analyzeBtn'), analyze);
+  $('#analyzeBtn').onclick = () => task($('#analyzeBtn'), async () => { try { await analyze(); } catch (error) { progress(`分析失败：${error.message || '请检查视觉模型接口'}。未生成替代规范；原有规范和作品未改变。`); throw error; } });
   $('#mdInput').onchange = e => task(null, async () => { const file = e.target.files[0]; if (!file) return; if (file.size > 2 * 1024 * 1024) throw new Error('MD 文件超过 2MB。'); const md = await file.text(); parseDesignMd(md); setMd(md); e.target.value = ''; await persist(); });
   bindBrandDropzone('brandLogoDropzone', 'brandLogoInput', saveBrandLogo);
   bindBrandDropzone('brandFontDropzone', 'brandFontInput', saveBrandFont);
   $('#loadAppleBtn').onclick = () => task($('#loadAppleBtn'), async () => { const md = await (await fetch('/UI-DESIGN.md')).text(); parseDesignMd(md); setMd(md); await persist(); toast('已载入你提供的 Apple 规范；确认后才会用于新作品。'); });
   $('#mdEditor').oninput = () => { project.md = $('#mdEditor').value; project.approvedMd = ''; invalidate('规范已变化，请重新确认。'); renderGate(); $('#mdStatus').textContent = '已修改 · 待确认'; changed(); };
   $('#mdEditor').onblur = renderSpec;
-  $('#approveBtn').onclick = () => task($('#approveBtn'), async () => { parseDesignMd(project.md); project.approvedMd = project.md; const last = project.history.at(-1); if (!last || last.md !== project.md) project.history.push({ version: (last?.version || 0) + 1, date: new Date().toISOString(), md: project.md }); project.history = project.history.slice(-10); renderSpec(); await persist(); go('compose'); });
+  $('#approveBtn').onclick = () => task($('#approveBtn'), async () => { if (parseDesignMd(project.md).requiresReanalysis) throw new Error('旧规范包含本地分析或文字识别结果，请使用视觉模型重新分析参考图后再确认。'); project.approvedMd = project.md; const last = project.history.at(-1); if (!last || last.md !== project.md) project.history.push({ version: (last?.version || 0) + 1, date: new Date().toISOString(), md: project.md }); project.history = project.history.slice(-10); renderSpec(); await persist(); go('compose'); });
   $('#downloadMdBtn').onclick = () => { try { parseDesignMd(project.md); downloadText(project.md, 'DESIGN.md'); } catch (e) { fail(e); } };
   $('#assetInput').onchange = e => task($('#composeBtn'), async () => { try { const files = [...e.target.files]; if (!files.length) return; if (project.assets.length + files.length > MAX_ASSETS) throw new Error(`每套最多 20 张图片，当前 ${project.assets.length} 张，还能添加 ${MAX_ASSETS - project.assets.length} 张。本次未添加任何图片。`); const added = await readFiles(files, 'asset'); added.forEach(a => { a.copy = { title: '', body: '', detail: '' }; }); project.assets.push(...added); invalidate('图片已添加，请逐张填写对应文案。'); renderAssets(); await persist(); } finally { e.target.value = ''; } });
 

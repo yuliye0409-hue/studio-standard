@@ -23,14 +23,35 @@ test('referenced colors and low contrast are real',()=>{
   const x=parseDesignMd("---\ncolors: {canvas: '#eee', ink: '{colors.canvas}'}\n---\n");assert.equal(x.tokens.colors.background,'#eeeeee');assert.equal(x.warnings.length,1); assert.ok(contrast('#000000','#ffffff')>20);
 });
 function reference(color){const a=new Uint8ClampedArray(40*40*4);for(let i=0;i<a.length;i+=4){a.set([...color,255],i);}for(let y=12;y<30;y++)for(let x=10;x<30;x++)a.set([0,0,0,255],(y*40+x)*4);return {id:'ref',name:'参考',width:40,height:40,hash:color.join('-'),analysis:measurePixels(a,40,40)};}
+
+test('legacy OCR cannot affect new evidence, typography, module boundaries or exported design system',()=>{
+  const clean=reference([230,80,90]),dirty=structuredClone(clean);
+  dirty.ocr={text:'OCR_GARBAGE',confidence:99,lines:[{text:'OCR_GARBAGE',confidence:99,relativeHeight:.18,centerX:.1,bbox:{x0:0,y0:0,x1:30,y1:8}}]};
+  dirty.evidence={elements:[{id:'text-1',role:'headline',text:'OCR_GARBAGE',bbox:{x:0,y:0,width:.8,height:.2,confidence:.99,source:'ocr'}}],layout:{align:'left',safeArea:.18}};
+  assert.deepEqual(extractLayoutEvidence(dirty),extractLayoutEvidence(clean));
+  assert.deepEqual(extractAPlusModules(dirty),extractAPlusModules(clean));
+  assert.equal(buildAnalysisMd([dirty],'Same'),buildAnalysisMd([clean],'Same'));
+  assert.doesNotMatch(JSON.stringify(buildDesignSystem([dirty])),/OCR_GARBAGE/);
+});
+
+test('OCR-derived imported standards require reanalysis but hand-authored MD stays usable',()=>{
+  const legacy=md().replace('name: Test','name: Test\nsource: {mode: local}\nanalysis: {method: measurement+ocr+human-review}');
+  assert.equal(parseDesignMd(legacy).requiresReanalysis,true);
+  assert.ok(parseDesignMd(legacy).warnings.some(w=>w.includes('重新分析')));
+  assert.equal(parseDesignMd(md()).requiresReanalysis,false);
+});
 test('different reference pixels produce different analysis MD and tokens',()=>{
   const red=reference([230,80,90]),blue=reference([40,100,220]);
   assert.equal(red.analysis.background,'#e6505a'); assert.ok(red.analysis.occupancy>.2);
-  const a=buildAnalysisMd([red],'A'),b=buildAnalysisMd([blue],'B');assert.notEqual(a,b);assert.notEqual(parseDesignMd(a).tokens.colors.background,parseDesignMd(b).tokens.colors.background);assert.match(a,/推测/);assert.match(a,/未启用 OCR/);assert.throws(()=>buildAnalysisMd([],'x'));
+  const a=buildAnalysisMd([red],'A'),b=buildAnalysisMd([blue],'B');assert.notEqual(a,b);assert.notEqual(parseDesignMd(a).tokens.colors.background,parseDesignMd(b).tokens.colors.background);assert.match(a,/推测/);assert.doesNotMatch(a,/OCR Evidence|OCR/);assert.throws(()=>buildAnalysisMd([],'x'));
 });
-test('analysis creates coordinate evidence and a machine-readable design system',()=>{
-  const ref=reference([230,80,90]);ref.ocr={confidence:91,lines:[{text:'Hero title',confidence:92,relativeHeight:.09,centerX:.2,bbox:{x0:20,y0:30,x1:340,y1:80}}]};
-  const evidence=extractLayoutEvidence(ref);assert.equal(evidence.elements[0].role,'headline');assert.equal(evidence.elements[0].bbox.source,'ocr');assert.ok(evidence.elements[0].bbox.x<.6);const system=buildDesignSystem([ref]);assert.equal(system.version,'design-system/1');assert.equal(system.references[0].evidence.elements.length, evidence.elements.length);const md=buildAnalysisMd([ref],'Evidence');assert.match(md,/Evidence Map/);assert.match(md,/confidence/);assert.equal(parseDesignMd(md).document.analysis.method,'measurement+ocr+human-review');
+test('analysis uses model evidence, ignores OCR and exports a machine-readable design system',()=>{
+  const ref=reference([230,80,90]);ref.ocr={confidence:91,lines:[{text:'OCR_GARBAGE',confidence:92,relativeHeight:.09,centerX:.2,bbox:{x0:20,y0:30,x1:340,y1:80}}]};
+  ref.evidence={elements:[{id:'vision-1',role:'headline',text:'',bbox:{x:.1,y:.1,width:.4,height:.1,confidence:.92,source:'vision'}}]};
+  const evidence=extractLayoutEvidence(ref);assert.equal(evidence.elements[0].role,'headline');assert.equal(evidence.elements[0].bbox.source,'vision');assert.ok(evidence.elements[0].bbox.x<.6);
+  const system=buildDesignSystem([ref]);assert.equal(system.version,'design-system/2');assert.equal(system.references[0].evidence.elements.length,1);
+  const visual={description:'Model visual analysis',references:[{index:0,elements:[],modules:[]}],colors:{},layout:{}};
+  const md=buildAnalysisMd([ref],'Evidence','vision',visual);assert.match(md,/Evidence Map/);assert.match(md,/confidence/);assert.equal(parseDesignMd(md).document.analysis.method,'multimodal+measurement+human-review');assert.doesNotMatch(md,/OCR_GARBAGE|OCR Evidence/);
 });
 test('long A+ references without reliable structure are not divided into invented equal sections',()=>{
   const ref={...reference([230,80,90]),width:1500,height:7995,evidence:{elements:[]}};
