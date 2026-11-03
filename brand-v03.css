@@ -37,3 +37,22 @@
 .asset-layout-result,.board-layout-match{overflow-wrap:anywhere}
 .board-layout-match{padding:0 14px;margin:0 0 12px}
 .asset-layout-error{color:#b42318;background:#fff0ee;border:1px solid #f7b7ae;border-radius:8px;padding:10px;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+
+/* Step 03 keeps the setup order visible and gives the empty preview a measured presence. */
+.compose-grid{grid-template-columns:minmax(380px,.9fr) minmax(0,1.55fr);gap:28px}
+.compose-grid>aside{display:flex;flex-direction:column;gap:18px;min-width:0}
+.compose-grid>aside>.spec-import-card{order:-1;background:#f8f9fb;border-color:#e3e5e8}
+.compose-grid>aside>.card{min-width:0}
+.spec-import-card{padding:24px!important}
+.spec-import-card h3{margin-bottom:10px}
+.spec-import-card>p:first-of-type{margin:0 0 16px;color:var(--muted);font-size:13px;line-height:1.65}
+.spec-import-card .button-row{justify-content:space-between;align-items:center;gap:10px}
+.spec-import-card textarea{min-height:180px;max-height:520px;margin-top:14px;background:#fff;border-color:#d9dce1;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:0}
+.spec-import-card .token-preview{padding:12px 0 2px}
+.spec-import-card .full{margin-top:4px}
+.compose-grid>div:last-child{min-width:0}
+.preview-heading{margin-bottom:14px;padding:0 2px}
+.board-grid{gap:18px}
+.empty-board{min-height:clamp(400px,52vh,560px);border:1px solid #eef0f2;border-radius:12px}
+@media(max-width:1000px){.compose-grid{grid-template-columns:minmax(330px,.9fr) minmax(0,1.3fr);gap:22px}}
+@media(max-width:833px){.compose-grid{grid-template-columns:1fr;gap:18px}.compose-grid>aside{gap:14px}.spec-import-card textarea{min-height:160px}.empty-board{min-height:360px}}

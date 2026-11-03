@@ -7,7 +7,7 @@ const $$ = selector => [...document.querySelectorAll(selector)];
 const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
 const MAX_ASSETS = 20;
 const fresh = () => ({ schema: SCHEMA, id: uid(), name: '我的设计项目', updatedAt: new Date().toISOString(), references: [], assets: [], brand: { logo: null, fonts: [] }, md: '', approvedMd: '', history: [], boards: [], reviewedBoards: [], reports: [], visualAnalysis: null, canvas: { width: 1080, height: 1350 } });
-let project, currentView = 'overview', previews = new Map(), saveTimer, busy = false;
+let project, currentView = 'compose', previews = new Map(), saveTimer, busy = false;
 let serverStatus = null;
 const compositionErrors = new Map();
 function boardAssets() { return project.brand?.logo ? [...project.assets, project.brand.logo] : project.assets; }
@@ -35,7 +35,10 @@ async function task(button, fn) {
   try { await fn(); } catch (error) { fail(error); } finally { busy = false; $('#composeView').inert = false; if (button) { button.disabled = false; button.textContent = label; } renderReview(); }
 }
 function go(view) {
-  currentView = ['overview', 'analyze', 'compose', 'export', 'sop'].includes(view) ? view : 'overview';
+  // Reference analysis is intentionally completed in Codex. The website starts
+  // at the production workspace and only handles an imported, human-reviewed MD.
+  if (view === 'analyze' || view === 'overview') view = 'compose';
+  currentView = ['compose', 'export', 'sop'].includes(view) ? view : 'compose';
   $$('.view').forEach(n => n.classList.toggle('hidden', n.id !== currentView + 'View'));
   if (currentView === 'export') renderReport();
   window.scrollTo({ top: 0, behavior: 'instant' });
@@ -49,10 +52,10 @@ function invalidate(reason) { project.boards = []; project.reviewedBoards = []; 
 function progress(message) { $('#analysisProgress').classList.remove('hidden'); $('#analysisProgress').textContent = message; }
 function needsReanalysis() { try { return !!project.md && parseDesignMd(project.md).requiresReanalysis; } catch { return false; } }
 function approved() { return !!project.md && project.md === project.approvedMd && !needsReanalysis(); }
-function renderGate() { $('#composeGate').textContent = approved() ? '规范已确认。原图完整显示；标题、正文、补充信息逐字保留。' : (needsReanalysis() ? '旧规范包含本地识别结果，请先用视觉模型重新分析参考图。' : '请先生成或导入 DESIGN.md，并确认规范。'); $('#composeGate').classList.toggle('ok', approved()); }
+function renderGate() { $('#composeGate').textContent = approved() ? '规范已确认。原图完整显示；标题、正文、补充信息逐字保留。' : (needsReanalysis() ? '当前规范来自旧版本地识别流程，不能直接作为排版依据；请在 Codex 中重新分析参考图并导入新的 DESIGN.md。' : '请导入 Codex 生成的 DESIGN.md，并确认规范后开始排版。'); $('#composeGate').classList.toggle('ok', approved()); }
 function renderSpec() {
   $('#mdEditor').value = project.md;
-  $('#mdStatus').textContent = project.md ? (approved() ? '已确认 · 可用于排版' : (needsReanalysis() ? '旧规范需视觉模型重新分析' : '待确认 · 修改参数后请重新确认')) : '尚未生成或导入规范';
+  $('#mdStatus').textContent = project.md ? (approved() ? '已确认 · 可用于排版' : (needsReanalysis() ? '旧规范不可直接使用，请从 Codex 导入新规范' : '待确认 · 检查后点击确认')) : '尚未导入规范';
   const container = $('#tokenPreview'); container.replaceChildren();
   try {
     if (project.md) {
@@ -76,7 +79,7 @@ function renderEvidence() {
   const roles = [['headline','标题'],['body','正文'],['price','价格/规格'],['product','商品候选'],['decorative','装饰'],['unknown','待确认']];
   const sources = { vision: '视觉模型' };
   const refs = needsReanalysis() ? [] : project.references.filter(r => r.evidence?.elements?.some(item => item.bbox?.source === 'vision'));
-  if (!refs.length) { container.append(el('p', 'fine-print', needsReanalysis() ? '旧文字识别结果已停用。原图和文案保留，请重新进行视觉模型分析。' : '模型分析后，这里会显示标题、正文和商品区域及其判断依据；不复制参考图文字。')); return; }
+  if (!refs.length) { container.append(el('p', 'fine-print', '参考图分析已在 Codex 中完成；这里不再重复识别图片。请以导入的 DESIGN.md 为排版依据。')); return; }
   refs.forEach(ref => { const section = el('div', 'evidence-reference'); section.append(el('strong', '', ref.name)); for (const item of ref.evidence.elements.filter(item => item.bbox?.source === 'vision')) {
     const row = el('div', 'evidence-row'), copy = el('div', 'evidence-copy'), select = document.createElement('select');
     const title = `视觉区域：${roles.find(([value]) => value === item.role)?.[1] || '待确认'}`;
@@ -127,6 +130,7 @@ function renderHistory() {
 }
 function setMd(md) { project.md = md; project.approvedMd = ''; invalidate('规范已改变，需要重新生成作品。'); renderSpec(); changed(); }
 function renderReferences() {
+  if (!$('#referenceCount')) return;
   $('#referenceCount').textContent = `${project.references.length} 张`;
   const list = $('#referenceList'); list.replaceChildren();
   for (const ref of project.references) {
@@ -217,7 +221,7 @@ function renderAssets() {
   }
 }
 async function compose() {
-  if (!approved()) { go('analyze'); throw new Error('请先确认规范。'); }
+  if (!approved()) { go('compose'); throw new Error('请先在 STEP 03 导入并确认 DESIGN.md。'); }
   if (!project.assets.length) throw new Error('请添加未排版的商品图片。文案只排入你提供的内容，可留空。');
   if (project.assets.length > MAX_ASSETS) throw new Error('每套最多 20 张图片，请删除多余素材或拆分项目。');
   const { tokens } = parseDesignMd(project.md), measure = textMeasurer();
@@ -342,7 +346,7 @@ async function restore(file) {
   }
   const restored = { ...fresh(), id: uid(), name: String(imported.name || '恢复的项目') + ' · 恢复', references: imported.references, assets: imported.assets.map(asset => ({ ...asset, copy: { title: '', body: '', detail: '', ...(asset.copy || {}) } })), brand: imported.brand || { logo: null, fonts: [] }, md: String(imported.md || ''), analysisMode: imported.analysisMode || null, visualAnalysis: imported.visualAnalysis || null, canvas: imported.canvas || { width: 1080, height: 1350 }, approvedMd: '', boards: [], reports: [], history: [] };
   if (restored.md) parseDesignMd(restored.md);
-  await useProject(restored); $('#projectDialog').close(); go('analyze'); toast('素材与文案已恢复，请重新确认规范后生成。');
+  await useProject(restored); $('#projectDialog').close(); go('compose'); toast('素材与文案已恢复，请在 STEP 03 重新确认规范后生成。');
 }
 async function loadSop() {
   const text = await (await fetch('/SOP.md')).text(), container = $('#sopContent'); container.replaceChildren();
@@ -359,18 +363,12 @@ function syncCanvasPreset() {
 
 function wire() {
   $$('[data-view]').forEach(n => n.onclick = e => { e.preventDefault(); go(n.dataset.view); });
-  $('#referenceInput').onchange = e => task($('#analyzeBtn'), async () => { await uploadReferences([...e.target.files]); e.target.value = ''; });
-  for (const type of ['dragenter', 'dragover']) $('#referenceDropzone').addEventListener(type, e => { e.preventDefault(); $('#referenceDropzone').classList.add('dragging'); });
-  for (const type of ['dragleave', 'drop']) $('#referenceDropzone').addEventListener(type, e => { e.preventDefault(); $('#referenceDropzone').classList.remove('dragging'); if (type === 'drop') task($('#analyzeBtn'), () => uploadReferences([...e.dataTransfer.files])); });
-
-  $('#analyzeBtn').onclick = () => task($('#analyzeBtn'), async () => { try { await analyze(); } catch (error) { progress(`分析失败：${error.message || '请检查视觉模型接口'}。未生成替代规范；原有规范和作品未改变。`); throw error; } });
   $('#mdInput').onchange = e => task(null, async () => { const file = e.target.files[0]; if (!file) return; if (file.size > 2 * 1024 * 1024) throw new Error('MD 文件超过 2MB。'); const md = await file.text(); parseDesignMd(md); setMd(md); e.target.value = ''; await persist(); });
   bindBrandDropzone('brandLogoDropzone', 'brandLogoInput', saveBrandLogo);
   bindBrandDropzone('brandFontDropzone', 'brandFontInput', saveBrandFont);
-  $('#loadAppleBtn').onclick = () => task($('#loadAppleBtn'), async () => { const md = await (await fetch('/UI-DESIGN.md')).text(); parseDesignMd(md); setMd(md); await persist(); toast('已载入你提供的 Apple 规范；确认后才会用于新作品。'); });
   $('#mdEditor').oninput = () => { project.md = $('#mdEditor').value; project.approvedMd = ''; invalidate('规范已变化，请重新确认。'); renderGate(); $('#mdStatus').textContent = '已修改 · 待确认'; changed(); };
   $('#mdEditor').onblur = renderSpec;
-  $('#approveBtn').onclick = () => task($('#approveBtn'), async () => { if (parseDesignMd(project.md).requiresReanalysis) throw new Error('旧规范包含本地分析或文字识别结果，请使用视觉模型重新分析参考图后再确认。'); project.approvedMd = project.md; const last = project.history.at(-1); if (!last || last.md !== project.md) project.history.push({ version: (last?.version || 0) + 1, date: new Date().toISOString(), md: project.md }); project.history = project.history.slice(-10); renderSpec(); await persist(); go('compose'); });
+  $('#approveBtn').onclick = () => task($('#approveBtn'), async () => { if (!project.md.trim()) throw new Error('请先导入 DESIGN.md。'); if (parseDesignMd(project.md).requiresReanalysis) throw new Error('当前规范包含旧版本地识别结果，请在 Codex 中重新分析参考图后导入新的 DESIGN.md。'); project.approvedMd = project.md; const last = project.history.at(-1); if (!last || last.md !== project.md) project.history.push({ version: (last?.version || 0) + 1, date: new Date().toISOString(), md: project.md }); project.history = project.history.slice(-10); renderSpec(); await persist(); go('compose'); });
   $('#downloadMdBtn').onclick = () => { try { parseDesignMd(project.md); downloadText(project.md, 'DESIGN.md'); } catch (e) { fail(e); } };
   $('#assetInput').onchange = e => task($('#composeBtn'), async () => { try { const files = [...e.target.files]; if (!files.length) return; if (project.assets.length + files.length > MAX_ASSETS) throw new Error(`每套最多 20 张图片，当前 ${project.assets.length} 张，还能添加 ${MAX_ASSETS - project.assets.length} 张。本次未添加任何图片。`); const added = await readFiles(files, 'asset'); added.forEach(a => { a.copy = { title: '', body: '', detail: '' }; }); project.assets.push(...added); invalidate('图片已添加，请逐张填写对应文案。'); renderAssets(); await persist(); } finally { e.target.value = ''; } });
 
@@ -387,17 +385,17 @@ function wire() {
   $('#saveBtn').onclick = () => persist().then(() => toast('项目已保存至本机浏览器。')).catch(fail);
   $('#projectMenuBtn').onclick = () => showProjects().catch(fail);
   $('#renameProjectBtn').onclick = () => task($('#renameProjectBtn'), async () => { const name = $('#projectNameInput').value.trim(); if (!name) throw new Error('项目名称不能为空。'); project.name = name; $('#projectMenuBtn').replaceChildren(document.createTextNode(name + ' '), el('span', '', '⌄')); await persist(); toast('项目已重命名。'); });
-  $('#newProjectBtn').onclick = () => task($('#newProjectBtn'), async () => { await persist(); await useProject(fresh()); $('#projectDialog').close(); go('analyze'); });
+  $('#newProjectBtn').onclick = () => task($('#newProjectBtn'), async () => { await persist(); await useProject(fresh()); $('#projectDialog').close(); go('compose'); });
   $('#projectInput').onchange = e => task(null, async () => { await restore(e.target.files[0]); e.target.value = ''; });
-  const settings = () => { $('#settingsDialog').showModal(); refreshStatus().catch(fail); };
-  $('#settingsBtn').onclick = settings; $('#footerSettingsBtn').onclick = settings;
-  $('#saveSettingsBtn').onclick = () => task($('#saveSettingsBtn'), async () => { const result = await api('config', { baseUrl: $('#apiBase').value, model: $('#apiModel').value, protocol: $('#apiProtocol').value, key: $('#apiKey').value }); $('#apiKey').value = ''; await refreshStatus(); $('#settingsStatus').textContent = result.configured ? '接口已配置（尚未发送图片验证）；分析前会明确征求发送确认。' : '还缺少 API Key。'; });
   window.addEventListener('pagehide', () => { if (project) saveProject(project).catch(() => {}); });
 }
 
 async function start() {
+  // The legacy overview and reference-analysis screens remain only for old
+  // project data compatibility; they are removed from the live UI.
+  $('#overviewView')?.remove(); $('#analyzeView')?.remove();
   wire(); const projects = await listProjects(); await useProject(projects[0] || fresh());
-  await refreshStatus(); await loadSop();
+  await loadSop(); go('compose');
   document.body.dataset.ready = 'true';
 }
 start().catch(error => { $('#saveStatus').textContent = '启动异常'; fail(error); });
