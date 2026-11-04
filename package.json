@@ -6,7 +6,7 @@
   "packageManager": "pnpm@11.25.0",
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test tests/core.test.mjs",
+    "test": "node --test tests/core.test.mjs tests/figma.test.mjs tests/reconstruction.test.mjs",
     "test:e2e": "node tests/e2e.mjs"
   },
   "dependencies": {
