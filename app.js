@@ -1,4 +1,4 @@
-import { SCHEMA, dimensions, normalizeResult, inspectRegion, enabledLayers, boardFor } from './lib/reconstruction.js';
+import { SCHEMA, dimensions, normalizeResult, inspectRegion, enabledLayers, boardFor, cleanRaster, pathCommands } from './lib/reconstruction.js';
 
 const $ = id => document.getElementById(id);
 const state = { assets: [], selected: null, layer: null, view: 'rebuilt', drawing: false, busy: false, editorDirty: false, editorKey: '', pending: [], config: { useCustom: false }, server: null };
@@ -42,6 +42,11 @@ function textLines(ctx, layer) {
 }
 function drawLayer(ctx, layer) {
   ctx.fillStyle = layer.color;
+  if (layer.type === 'VECTOR') {
+    ctx.save(); ctx.translate(layer.x, layer.y); ctx.strokeStyle = layer.color; ctx.lineWidth = layer.strokeWidth || 1;
+    for (const p of layer.vectorPaths) { const path = new Path2D(p.data); if (layer.filled && p.windingRule !== 'NONE') ctx.fill(path, p.windingRule === 'EVENODD' ? 'evenodd' : 'nonzero'); if (layer.strokeWidth) ctx.stroke(path); }
+    ctx.restore(); return false;
+  }
   if (layer.type === 'RECTANGLE') { ctx.fillRect(layer.x, layer.y, layer.width, layer.height); return false; }
   if (layer.type === 'ELLIPSE') { ctx.beginPath(); ctx.ellipse(layer.x + layer.width / 2, layer.y + layer.height / 2, layer.width / 2, layer.height / 2, 0, 0, Math.PI * 2); ctx.fill(); return false; }
   ctx.font = layer.fontWeight + ' ' + layer.fontSize + 'px ' + JSON.stringify(layer.fontFamily) + ', Arial, sans-serif'; ctx.textBaseline = 'top'; ctx.textAlign = layer.align;
@@ -53,7 +58,7 @@ function drawLayer(ctx, layer) {
 async function builtCanvas(asset, includeText = true) {
   const c = await sourceCanvas(asset), ctx = c.getContext('2d');
   const layers = enabledLayers(asset.layers);
-  for (const layer of layers) { const p = layer.check.patch || layer; ctx.fillStyle = layer.check.background; ctx.fillRect(p.x, p.y, p.width, p.height); }
+  if (layers.length) { const image = ctx.getImageData(0, 0, c.width, c.height); image.data.set(cleanRaster(image.data, c.width, c.height, layers)); ctx.putImageData(image, 0, 0); }
   const overflow = [];
   if (includeText) for (const layer of layers) if (drawLayer(ctx, layer)) overflow.push(layer.name);
   return { canvas: c, overflow };
@@ -77,8 +82,10 @@ function renderSelection(box = selectedLayer()) {
   if (box && current()) { el.style.left = box.x / current().width * 100 + '%'; el.style.top = box.y / current().height * 100 + '%'; el.style.width = box.width / current().width * 100 + '%'; el.style.height = box.height / current().height * 100 + '%'; }
 }
 function updateExport() {
-  const eligible = state.assets.length && state.assets.every(a => a.reviewed && !a.overflow?.length) && !state.busy && !state.editorDirty;
+  const native = state.assets.reduce((n, a) => n + a.layers.filter(l => l.enabled).length, 0);
+  const eligible = native && state.assets.length && state.assets.every(a => a.reviewed && !a.overflow?.length) && !state.busy && !state.editorDirty;
   $('export-open').disabled = !eligible;
+  $('export-reason').textContent = state.busy ? '正在处理图片…' : state.editorDirty ? '请先应用图层修改' : !state.assets.length ? '先上传图片并分析' : !native ? '尚无可编辑文字或图形，请分析或调整候选' : state.assets.some(a => a.overflow?.length) ? '请调整超出边界的文字' : state.assets.some(a => !a.reviewed) ? '请在预览下方逐图勾选核对' : native + ' 个原生图层 · 可以导出';
   $('asset-reviewed').disabled = state.busy || state.editorDirty || !!current()?.overflow?.length;
   $('asset-reviewed').checked = !!current()?.reviewed;
 }
@@ -114,7 +121,7 @@ function render() {
   if (!a?.layers.length) $('layer-list').append(element('div', 'empty-layers', a ? '照片与复杂细节保留为图片。可点击分析，或手动画出文字区域。' : '等待选择图片'));
   for (const l of a?.layers || []) {
     const b = element('button', 'layer-card' + (state.layer === l.id ? ' active' : '')); b.type = 'button';
-    const info = element('span'); info.append(element('strong', '', l.name), element('small', l.enabled ? 'editable' : '', l.enabled ? '✓ 原生图层 · 已启用' : l.check?.safe ? '可提取 · 等待核对启用' : '保留位图 · 背景检查未通过'));
+    const info = element('span'); info.append(element('strong', '', l.name), element('small', l.enabled ? 'editable' : '', l.enabled ? '✓ ' + (l.type === 'TEXT' ? '文字层' : '矢量图形') + (l.check?.method === 'inpaint' ? ' · 背景近似修补' : ' · 已启用') : l.check?.safe ? '可提取 · 等待核对启用' : '需调整 · ' + l.check?.reason));
     b.append(element('span', 'layer-icon', l.type === 'TEXT' ? 'T' : l.type === 'ELLIPSE' ? '○' : '□'), info);
     b.onclick = () => { if (!discardDraft()) return; state.layer = l.id; state.drawing = false; render(); }; $('layer-list').append(b);
   }
@@ -170,11 +177,15 @@ $('layer-editor').onsubmit = async e => {
   for (const k of ['x', 'y', 'width', 'height']) next[k] = Math.round(Number($('layer-' + k).value));
   if (l.type === 'TEXT') Object.assign(next, { characters: $('layer-text').value, name: $('layer-text').value.slice(0, 24) || '文字', fontFamily: $('layer-font').value.trim() || 'Arial', fontSize: Number($('layer-font-size').value) });
   if (next.type === 'TEXT' && (!next.characters.trim() || next.characters.length > 10000 || next.fontSize < 1 || next.fontSize > 2048 || !Number.isFinite(next.fontSize))) return toast('请填写原文和有效字号。');
+  if (l.type === 'VECTOR') {
+    try { next.vectorPaths = l.vectorPaths.map(p => ({ ...p, data: pathCommands(p.data, l.width, l.height).map(({command, values}) => command + (values.length ? ' ' + values.map((v, i) => Number((v * (i % 2 ? next.height / l.height : next.width / l.width)).toFixed(4))).join(' ') : '')).join(' ') })); } catch (error) { return toast(error.message); }
+  }
+  next.confidence = 1; // Applying an explicit user correction confirms this candidate, not the untouched model guesses.
   Object.assign(l, next); state.editorDirty = false; l.enabled = false; await recheck(a); changed(a); render(); toast('已重新检查，请核对后重新启用。');
 };
 let startPoint;
 function pointerPoint(event) { const b = $('preview-canvas').getBoundingClientRect(), a = current(); return { x: Math.max(0, Math.min(a.width, Math.round((event.clientX - b.left) / b.width * a.width))), y: Math.max(0, Math.min(a.height, Math.round((event.clientY - b.top) / b.height * a.height))) }; }
-$('manual-add').onclick = () => { if (!current() || state.busy || !discardDraft()) return; state.drawing = !state.drawing; state.layer = null; state.view = 'original'; render(); if (state.drawing) toast('在原图上拖出完整文字区域，四周保留少量纯色留白。'); };
+$('manual-add').onclick = () => { if (!current() || state.busy || !discardDraft()) return; state.drawing = !state.drawing; state.layer = null; state.view = 'original'; render(); if (state.drawing) toast('在原图上拖出完整文字区域，不要框入其他文字或物体。'); };
 $('preview-canvas').onpointerdown = e => { if (!state.drawing) return; e.preventDefault(); startPoint = pointerPoint(e); e.target.setPointerCapture(e.pointerId); };
 $('preview-canvas').onpointermove = e => { if (!state.drawing || !startPoint) return; const p = pointerPoint(e); renderSelection({ x: Math.min(p.x, startPoint.x), y: Math.min(p.y, startPoint.y), width: Math.abs(p.x - startPoint.x), height: Math.abs(p.y - startPoint.y) }); };
 $('preview-canvas').onpointerup = async e => {
@@ -240,10 +251,11 @@ $('consent-confirm').onclick = async () => {
       let data; try { data = await response.json(); } catch { throw new Error('网站服务返回了非 JSON 响应，请检查部署日志；原图与候选未改动。'); }
       if (!response.ok) throw new Error(data.error || '分析失败。');
       // Re-validate server results at the browser boundary, never trust supplied checks or enabled flags.
-      const normalized = normalizeResult({ layers: data.layers.map(l => ({ ...l, bbox: [l.x / a.width, l.y / a.height, l.width / a.width, l.height / a.height], text: l.characters })) }, a.width, a.height);
+      const normalized = normalizeResult({ layers: data.layers.map(l => inputLayer(l, a)) }, a.width, a.height);
       const previous = a.layers; a.layers = normalized;
       try { await recheck(a); } catch (error) { a.layers = previous; throw error; }
-      a.analyzed = true; a.notes = (data.notes || '分析完成。') + '\n字体为推测；请逐项核对并启用。未通过检查的区域保留在图片里。'; changed(a); succeeded++;
+      for (const l of a.layers) if (l.check.safe) { l.enabled = true; try { enabledLayers(a.layers); } catch { l.enabled = false; l.check.reason += ' 与其他候选冲突，请只启用一项。'; } }
+      a.analyzed = true; a.notes = (data.notes || '分析完成。') + '\n通过检查的文字与图形已准备为原生图层。字体为推测，照片背景为近似修补；请核对原文、路径与重影后确认。未通过检查的候选不会冒充可编辑图层。'; changed(a); succeeded++;
     } catch (error) { a.error = error.name === 'TimeoutError' ? '请求超时，未自动重试。建议先分析单个模块。' : error.message; a.notes = ''; }
     render();
   }
@@ -251,6 +263,11 @@ $('consent-confirm').onclick = async () => {
 };
 function db() { return new Promise((resolve, reject) => { const r = indexedDB.open('studio-layers-v1', 1); r.onupgradeneeded = () => r.result.createObjectStore('workspace'); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); }); }
 function projectData() { return { schema: 'studio-layers-project/1', assets: state.assets.map(a => ({ id: a.id, name: a.name, width: a.width, height: a.height, dataUrl: a.dataUrl, layers: a.layers.map(({ check, ...l }) => l), analyzed: a.analyzed, reviewed: a.reviewed, notes: a.notes })), selected: state.selected }; }
+function inputLayer(l, asset) {
+  const result = { ...l, bbox: [l.x / asset.width, l.y / asset.height, l.width / asset.width, l.height / asset.height], text: l.characters };
+  if (l.type === 'VECTOR') result.paths = l.vectorPaths.map(p => ({ ...p, data: pathCommands(p.data, l.width, l.height).map(({command, values}) => command + (values.length ? ' ' + values.map((n, i) => n / (i % 2 ? l.height : l.width)).join(' ') : '')).join(' ') }));
+  return result;
+}
 async function saveProject() {
   const database = await db(); try { await new Promise((resolve, reject) => { const t = database.transaction('workspace', 'readwrite'); t.objectStore('workspace').put(projectData(), 'current'); t.oncomplete = resolve; t.onerror = () => reject(t.error); }); } finally { database.close(); }
   dirty = false; $('save-status').textContent = '已保存至当前浏览器';
@@ -276,7 +293,7 @@ async function restore(data) {
     const a = { id: typeof item.id === 'string' && !ids.has(item.id) ? item.id : crypto.randomUUID(), name: String(item.name || 'image').slice(0, 200), width: item.width, height: item.height, dataUrl: item.dataUrl, layers: [], analyzed: !!item.analyzed, reviewed: false, notes: String(item.notes || '').slice(0,3000), error: '' };
     ids.add(a.id);
     if (!Array.isArray(item.layers)) throw new Error('备份图层列表无效。');
-    a.layers = normalizeResult({ layers: item.layers.map(l => ({ ...l, bbox: [l.x / a.width, l.y / a.height, l.width / a.width, l.height / a.height], text: l.characters })) }, a.width, a.height, { allowIncomplete: true });
+    a.layers = normalizeResult({ layers: item.layers.map(l => inputLayer(l, a)) }, a.width, a.height, { allowIncomplete: true });
     await recheck(a);
     a.layers.forEach((l, i) => l.enabled = !!item.layers[i].enabled && l.check.safe);
     enabledLayers(a.layers); assets.push(a);
@@ -293,7 +310,7 @@ $('export-open').onclick = () => {
   $('export-error').textContent = ''; $('export-dialog').showModal();
 };
 $('download-package').onclick = async () => {
-  if (state.busy || !state.assets.every(a => a.reviewed)) return;
+  if (state.busy || state.editorDirty || !state.assets.every(a => a.reviewed) || !state.assets.some(a => a.layers.some(l => l.enabled))) return;
   state.busy = true; $('download-package').disabled = true; $('export-error').textContent = ''; render();
   try {
     if (!globalThis.JSZip) throw new Error('导出组件加载失败，请刷新页面。');
@@ -306,7 +323,7 @@ $('download-package').onclick = async () => {
       data.boards.push(boardFor(a, rasterTiles(base.canvas, baseId, data.assets), rasterTiles(original, refId, data.assets)));
       zip.file('previews/' + prefix + '.png', full.canvas.toDataURL('image/png').split(',')[1], { base64: true });
       zip.file('originals/' + prefix + '.png', originalUrl.split(',')[1], { base64: true });
-      manifest.push({ name: a.name, width: a.width, height: a.height, editable: a.layers.filter(l => l.enabled).map(l => ({ name: l.name, type: l.type, characters: l.characters, x: l.x, y: l.y, width: l.width, height: l.height })), retainedRaster: a.layers.filter(l => !l.enabled).map(l => ({ name: l.name, reason: l.check.reason })) });
+      manifest.push({ name: a.name, width: a.width, height: a.height, editable: a.layers.filter(l => l.enabled).map(l => ({ name: l.name, type: l.type, characters: l.characters, vectorPaths: l.vectorPaths, backgroundMethod: l.check.method, warning: l.check.reason, x: l.x, y: l.y, width: l.width, height: l.height })), retainedRaster: a.layers.filter(l => !l.enabled).map(l => ({ name: l.name, reason: l.check.reason })) });
       full.canvas.width = base.canvas.width = original.width = 1;
     }
     const json = JSON.stringify(data); if (new Blob([json]).size > 175 * 1024 * 1024) throw new Error('分层文件超过175MB，请减少图片数量后导出。');

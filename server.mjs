@@ -21,7 +21,7 @@ export const server = createServer(async (req, res) => {
     if (pathname.startsWith('/api/')) {
       const host = req.headers.host, origins = new Set([`http://${host}`, `https://${host}`, process.env.STUDIO_PUBLIC_ORIGIN?.replace(/\/$/, '')].filter(Boolean));
       if (req.headers.origin && !origins.has(req.headers.origin)) return json(res, 403, { error: '仅允许当前工作台来源调用接口。' });
-      if (pathname === '/api/status' && req.method === 'GET') return json(res, 200, { version: '0.4.0', workflow: 'image-to-figma', vision: { configured: Boolean(config.key && config.model), model: config.model, baseUrl: config.baseUrl, protocol: config.protocol } });
+      if (pathname === '/api/status' && req.method === 'GET') return json(res, 200, { version: '0.5.0', workflow: 'image-to-figma', vision: { configured: Boolean(config.key && config.model), model: config.model, baseUrl: config.baseUrl, protocol: config.protocol } });
       if (['/api/config', '/api/vision', '/api/ocr'].includes(pathname)) return json(res, 410, { error: '旧规范分析接口已退役，请使用图片分层工作台。' });
       if (pathname !== '/api/reconstruct') return json(res, 404, { error: 'Not found' });
       if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed' });
@@ -40,6 +40,6 @@ export const server = createServer(async (req, res) => {
     res.end(req.method === 'HEAD' ? undefined : content);
   } catch (error) { json(res, 400, { error: error.message || '处理失败。' }); }
 });
-server.listen(port, process.env.STUDIO_HOST || '127.0.0.1', () => console.log(`Studio Layers v0.4 · http://${process.env.STUDIO_HOST || '127.0.0.1'}:${port}`));
+server.listen(port, process.env.STUDIO_HOST || '127.0.0.1', () => console.log(`Studio Layers v0.5 · http://${process.env.STUDIO_HOST || '127.0.0.1'}:${port}`));
 function shutdown() { server.close(); process.exit(0); }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);

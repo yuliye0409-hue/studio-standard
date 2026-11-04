@@ -7,7 +7,7 @@ const code=await readFile(new URL('../figma-plugin/code.js',import.meta.url),'ut
 function host(){
   const nodes=[],messages=[],page={children:[],selection:[]};
   const create=type=>{const n={type,x:0,y:0,width:100,height:100,children:[],removed:false,pluginData:{},setPluginData(k,v){this.pluginData[k]=v;},resize(w,h){this.width=w;this.height=h;},appendChild(child){if(child.parent){child.parent.children.splice(child.parent.children.indexOf(child),1);}this.children.push(child);child.parent=this;},remove(){this.removed=true;this.children.slice().forEach(x=>x.remove());if(this.parent)this.parent.children.splice(this.parent.children.indexOf(this),1);}};n.parent=page;page.children.push(n);nodes.push(n);return n;};
-  const figma={showUI(){},ui:{postMessage:x=>messages.push(x)},currentPage:page,viewport:{scrollAndZoomIntoView(){}},notify(){},listAvailableFontsAsync:async()=>[{fontName:{family:'Inter',style:'Regular'}},{fontName:{family:'Inter',style:'Semi Bold'}}],loadFontAsync:async()=>{},createImage:bytes=>({hash:'image-'+bytes.length}),createFrame:()=>create('FRAME'),createRectangle:()=>create('RECTANGLE'),createEllipse:()=>create('ELLIPSE'),createText:()=>create('TEXT')};vm.runInNewContext(code,{figma,__html__:'',Uint8Array,Map,Set});return{figma,nodes,messages};
+  const figma={showUI(){},ui:{postMessage:x=>messages.push(x)},currentPage:page,viewport:{scrollAndZoomIntoView(){}},notify(){},listAvailableFontsAsync:async()=>[{fontName:{family:'Inter',style:'Regular'}},{fontName:{family:'Inter',style:'Semi Bold'}}],loadFontAsync:async()=>{},createImage:bytes=>({hash:'image-'+bytes.length}),createFrame:()=>create('FRAME'),createRectangle:()=>create('RECTANGLE'),createEllipse:()=>create('ELLIPSE'),createVector:()=>create('VECTOR'),createText:()=>create('TEXT')};vm.runInNewContext(code,{figma,__html__:'',Uint8Array,Map,Set});return{figma,nodes,messages};
 }
 function data(){const tokens=parseDesignMd('---\nname: test\n---\n').tokens;const b=composeBoard({asset:{id:'a',width:600,height:800,hash:'original',name:'product'},copy:{title:'Title',body:'Literal body',detail:''},tokens,width:1080,height:1350,measure:(s,t)=>s.length*t.size*.6,fonts:{title:'Inter',body:'Inter'},id:'b'});return{schema:'studio-standard/2',tokens,boards:[b],assets:{a:{bytes:[1,2,3]}}};}
 test('A+ slot coordinates and photo-before-text ordering survive native import',async()=>{
@@ -41,4 +41,22 @@ test('Figma rejects oversized raster resources before creating long-image frames
 test('font-loading failure removes only frames created by this import',async()=>{
   const h=host(),existing=h.figma.createFrame();h.figma.loadFontAsync=async()=>{throw new Error('font unavailable');};
   await h.figma.ui.onmessage({type:'import',data:data()});assert.equal(h.messages[0].ok,false);assert.equal(h.figma.currentPage.children.length,1);assert.equal(h.figma.currentPage.children[0],existing);
+});
+
+test('new importer creates editable vector paths plus exact native text, and reports both counts',async()=>{
+  const h=host(),d=data(); d.schema='studio-reconstruction/2'; d.assets={};
+  d.boards=[{id:'native',name:'文字和切角标签',width:500,height:300,nodes:[
+    {id:'label',type:'VECTOR',name:'切角标签',x:20,y:30,width:200,height:80,color:'#efe5d7',filled:true,strokeWidth:0,vectorPaths:[{data:'M 10 0 L 190 0 L 200 10 L 200 70 L 190 80 L 10 80 L 0 70 L 0 10 Z',windingRule:'EVENODD'}]},
+    {id:'text',type:'TEXT',name:'原文',x:40,y:45,width:150,height:40,characters:'4.5  STARS',fontFamily:'Inter',fontSize:24,fontWeight:700,lineHeight:1.2,color:'#000000'}
+  ]}];
+  await h.figma.ui.onmessage({type:'import',data:d});assert.equal(h.messages[0].ok,true);
+  const children=h.figma.currentPage.children[0].children;
+  assert.equal(children[0].type,'VECTOR');assert.equal(children[0].vectorPaths[0].data,d.boards[0].nodes[0].vectorPaths[0].data);
+  assert.equal(children[0].locked,false);assert.equal(children[1].characters,'4.5  STARS');assert.equal(h.messages[0].textCount,1);assert.equal(h.messages[0].shapeCount,1);
+  const invalid=host(); d.boards[0].nodes[0].vectorPaths[0].data='M 0 0 L 999 0 Z';await invalid.figma.ui.onmessage({type:'import',data:d});assert.equal(invalid.messages[0].ok,false);assert.equal(invalid.nodes.length,0);
+});
+
+test('new reconstruction package with no native editable content is refused, not reported as conversion success',async()=>{
+  const h=host();await h.figma.ui.onmessage({type:'import',data:{schema:'studio-reconstruction/2',assets:{},boards:[{width:100,height:100,nodes:[]}]}});
+  assert.equal(h.messages[0].ok,false);assert.match(h.messages[0].message,/没有可编辑/);assert.equal(h.nodes.length,0);
 });

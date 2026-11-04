@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { color, normalizeResult, inspectRegion, enabledLayers, boardFor, dimensions } from '../lib/reconstruction.js';
+import { color, normalizeResult, inspectRegion, enabledLayers, boardFor, dimensions, cleanRaster } from '../lib/reconstruction.js';
 import { parseProvider, reconstruct, providerConfig } from '../lib/reconstruction-api.js';
 const text = { type: 'TEXT', name: '原文', bbox: [.1,.1,.6,.5], text: 'Exact  文案\n100% <&>', color: '#000', confidence: .95, fontSize: 12, fontWeight: 700, fontFamily: 'Arial', lineHeight: 1.2 };
 const layer = () => normalizeResult({ layers: [text] }, 100, 100)[0];
@@ -29,6 +29,47 @@ test('shape extraction verifies geometry rather than converting rounded or textu
   assert.equal(inspectRegion(p,100,100,{...shape,type:'ELLIPSE'}).safe,false);
   p.set([255,255,255,255],(25*100+25)*4);p.set([255,255,255,255],(26*100+25)*4);p.set([255,255,255,255],(27*100+25)*4);
   assert.equal(inspectRegion(p,100,100,shape).safe,false);
+});
+
+test('text on a photographic backdrop becomes editable using a foreground mask, not a flat-background gate', () => {
+  const p = pixels(put => {
+    for (let y=0;y<100;y++) for (let x=0;x<100;x++) put(x,y,[160+x/2,130+y/3,100+x/4]);
+    for (let y=20;y<40;y++) for (let x=20;x<45;x++) put(x,y,[0,0,0]);
+  });
+  const result = inspectRegion(p,100,100,layer());
+  assert.equal(result.safe,true); assert.equal(result.method,'inpaint');
+  assert.ok(result.mask.some(Boolean)); assert.match(result.reason,/近似/);
+});
+
+test('polygon label geometry is retained as native vector paths rather than replaced with a rectangle', () => {
+  const l = normalizeResult({layers:[{type:'VECTOR',name:'切角标签',bbox:[.1,.1,.6,.4],color:'#efe5d7',confidence:.96,paths:[{data:'M 0.1 0 L 0.9 0 L 1 0.2 L 1 0.8 L 0.9 1 L 0.1 1 L 0 0.8 L 0 0.2 Z',windingRule:'EVENODD'}]}]},100,100)[0];
+  assert.equal(l.type,'VECTOR'); assert.match(l.vectorPaths[0].data,/L 60 8/);
+  assert.throws(()=>normalizeResult({layers:[{...text,type:'VECTOR',paths:[{data:'M 0 0 L 2 1 Z'}]}]},100,100),/路径/);
+});
+
+test('photo cleanup removes old foreground only within the mask and preserves all other pixels exactly',()=>{
+  const p=pixels(put=>{for(let y=0;y<100;y++)for(let x=0;x<100;x++)put(x,y,[160+x/2,130+y/3,100+x/4]);for(let y=20;y<40;y++)for(let x=20;x<45;x++)put(x,y,[0,0,0]);});
+  const l=layer(); l.check=inspectRegion(p,100,100,l);l.enabled=true;
+  const out=cleanRaster(p,100,100,enabledLayers([l]));
+  assert.ok(out[(25*100+25)*4]>150); // old black glyph removed
+  for(let y=0;y<100;y++)for(let x=0;x<100;x++) {
+    const local=(y-l.y)*l.width+x-l.x;
+    if(x<l.x||x>=l.x+l.width||y<l.y||y>=l.y+l.height||!l.check.mask[local])assert.deepEqual(out.slice((y*100+x)*4,(y*100+x)*4+4),p.slice((y*100+x)*4,(y*100+x)*4+4));
+  }
+});
+
+test('large text cleanup reconstructs the whole text box so a glyph-shaped texture patch is not retained',()=>{
+  const p=pixels(put=>{for(let y=0;y<100;y++)for(let x=0;x<100;x++)put(x,y,[160+x/2,130+y/3,100+x/4]);for(let y=20;y<40;y++)for(let x=20;x<45;x++)put(x,y,[0,0,0]);});
+  const l=layer();l.check=inspectRegion(p,100,100,l);assert.equal(l.check.mask.every(Boolean),true);
+  const out=cleanRaster(p,100,100,[l]);
+  let error=0;for(let y=10;y<60;y++)for(let x=10;x<70;x++)error+=Math.abs(out[(y*100+x)*4]-(160+x/2));
+  assert.ok(error/3000<5,'background interpolation must remain close to the actual smooth backdrop');
+});
+
+test('text inside a label is allowed and the label is below the text in the exported layer stack',()=>{
+  const t={...layer(),enabled:true,check:{safe:true}},s={id:'shape',type:'RECTANGLE',x:5,y:5,width:80,height:70,enabled:true,check:{safe:true}};
+  assert.deepEqual(enabledLayers([t,s]).map(l=>l.id),['shape',t.id]);
+  assert.throws(()=>enabledLayers([t,{...s,x:30}]),/重叠/);
 });
 test('overlapping clear regions reject export; disabled candidates leave original raster untouched', () => {
   const l=layer(); l.check={safe:true,background:'#ffffff'}; l.enabled=true;

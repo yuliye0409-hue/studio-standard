@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>*{box-sizing:border-box}body{font:13px/1.7 -apple-system,BlinkMacSystemFont,'Inter',sans-serif;color:var(--figma-color-text,#1d1d1f);background:var(--figma-color-bg,#fff);padding:24px;margin:0}h1{font-size:22px;line-height:1.2;font-weight:600;letter-spacing:-.6px;margin:0 0 12px}p{color:var(--figma-color-text-secondary,#6e6e73);font-size:12px}label{display:block;margin:22px 0 8px}input{width:100%;font-size:12px}button{width:100%;padding:12px;border-radius:999px;border:0;background:#0066cc;color:white;margin:20px 0 0;cursor:pointer}button:disabled{opacity:.4;cursor:not-allowed}#status{white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto;padding:12px;background:var(--figma-color-bg-secondary,#f5f5f7);border-radius:8px;margin-top:18px}.caption{font-size:10px}</style></head><body><h1>继续编辑你的图片。</h1><p>导入 Studio Layers 的分层结果。已启用的文字与简单形状为原生图层；照片和复杂细节仍为图片。原图另存为隐藏锁定层供对照。</p><label for="file">选择 figma-import.json</label><input id="file" type="file" accept=".json"><button id="import" disabled>创建原生图层</button><div id="status" role="status">等待选择文件。插件完全离线，不发送图片或 API Key。</div><p class="caption">原始照片内部不会自动变成矢量。Figma 与浏览器的字体和换行可能不同；导入后会报告替换和高度差异。</p><script>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>*{box-sizing:border-box}body{font:13px/1.7 -apple-system,BlinkMacSystemFont,'Inter',sans-serif;color:var(--figma-color-text,#1d1d1f);background:var(--figma-color-bg,#fff);padding:24px;margin:0}h1{font-size:22px;line-height:1.2;font-weight:600;letter-spacing:-.6px;margin:0 0 12px}p{color:var(--figma-color-text-secondary,#6e6e73);font-size:12px}label{display:block;margin:22px 0 8px}input{width:100%;font-size:12px}button{width:100%;padding:12px;border-radius:999px;border:0;background:#0066cc;color:white;margin:20px 0 0;cursor:pointer}button:disabled{opacity:.4;cursor:not-allowed}#status{white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto;padding:12px;background:var(--figma-color-bg-secondary,#f5f5f7);border-radius:8px;margin-top:18px}.caption{font-size:10px}</style></head><body><h1>编辑文字与矢量图形。</h1><p>导入 Studio Layers 的分层结果。v0.5：文字为独立 TEXT，标签、线条和图标为矢量或基础形状；照片仍为图片。原图另存为隐藏锁定层供对照。</p><label for="file">选择 figma-import.json</label><input id="file" type="file" accept=".json"><button id="import" disabled>创建原生图层</button><div id="status" role="status">等待选择文件。插件完全离线，不发送图片或 API Key。</div><p class="caption">原始照片内部不会自动变成矢量。Figma 与浏览器的字体和换行可能不同；导入后会报告替换和高度差异。</p><script>
 let data;
 const status = document.querySelector('#status'), button = document.querySelector('#import');
 document.querySelector('#file').onchange = async event => {
@@ -6,7 +6,8 @@ document.querySelector('#file').onchange = async event => {
   try {
     const file = event.target.files[0]; if (!file) return; if (file.size > 180 * 1024 * 1024) throw new Error('文件超过 180MB，请拆分项目。');
     data = JSON.parse(await file.text());
-    if (!['studio-standard/2', 'studio-reconstruction/1'].includes(data.schema) || !data.boards?.length || !data.assets) throw new Error('文件格式不正确，请选择 figma-import.json，而不是项目备份。');
+    if (!['studio-standard/2', 'studio-reconstruction/1', 'studio-reconstruction/2'].includes(data.schema) || !data.boards?.length || !data.assets) throw new Error('文件格式不正确，请选择 figma-import.json，而不是项目备份。');
+    if (data.schema === 'studio-reconstruction/2' && !data.boards.some(b=>b.nodes?.some(n=>['TEXT','RECTANGLE','ELLIPSE','VECTOR'].includes(n.type)))) throw new Error('没有可编辑文字或图形，请回工作台重新分析并启用图层后导出。');
     for (const [id, asset] of Object.entries(data.assets)) {
       if (!/^data:image\/png;base64,/.test(asset.dataUrl)) throw new Error('Figma 图片须为工作台转换后的 PNG。');
       const raw = atob(asset.dataUrl.split(',')[1]); asset.bytes = Array.from(raw, character => character.charCodeAt(0)); delete asset.dataUrl; delete asset.originalDataUrl;
@@ -14,10 +15,10 @@ document.querySelector('#file').onchange = async event => {
     button.disabled = false; status.textContent = `已读取 ${data.boards.length} 个画板、${Object.keys(data.assets).length} 个素材。点击创建后插入当前页面，不覆盖已有设计。`;
   } catch (error) { data = undefined; status.textContent = '读取失败：' + error.message; }
 };
-button.onclick = () => { if (!data) return; button.disabled = true; status.textContent = '正在创建原生画板、文字和图片…'; parent.postMessage({ pluginMessage: { type: 'import', data } }, '*'); };
+button.onclick = () => { if (!data) return; button.disabled = true; status.textContent = '正在创建原生画板、文字、矢量图形和图片…'; parent.postMessage({ pluginMessage: { type: 'import', data } }, '*'); };
 onmessage = event => {
   const message = event.data.pluginMessage; if (message?.type !== 'result') return;
   button.disabled = false;
-  status.textContent = message.ok ? `已创建 ${message.count} 个原生画板、${message.textCount} 个文字图层。\n\n${message.notes.length ? '需复核：\n' + message.notes.join('\n') : '没有检测到字体替换或显著文字高度差异。仍请目视检查。'}` : '导入失败，已回滚本次创建的画板：' + message.message;
+  status.textContent = message.ok ? `已创建 ${message.count} 个原生画板、${message.textCount} 个文字图层、${message.shapeCount || 0} 个矢量图形。\n\n${message.notes.length ? '需复核：\n' + message.notes.join('\n') : '没有检测到字体替换或显著文字高度差异。仍请目视检查。'}` : '导入失败，已回滚本次创建的画板：' + message.message;
 };
 </script></body></html>
