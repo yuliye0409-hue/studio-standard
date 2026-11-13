@@ -7,7 +7,8 @@ const code=await readFile(new URL('../figma-plugin/code.js',import.meta.url),'ut
 function host(){
   const nodes=[],messages=[],page={children:[],selection:[]};
   const create=type=>{const n={type,x:0,y:0,width:100,height:100,children:[],removed:false,pluginData:{},setPluginData(k,v){this.pluginData[k]=v;},resize(w,h){this.width=w;this.height=h;},appendChild(child){if(child.parent){child.parent.children.splice(child.parent.children.indexOf(child),1);}this.children.push(child);child.parent=this;},remove(){this.removed=true;this.children.slice().forEach(x=>x.remove());if(this.parent)this.parent.children.splice(this.parent.children.indexOf(this),1);}};n.parent=page;page.children.push(n);nodes.push(n);return n;};
-  const figma={showUI(){},ui:{postMessage:x=>messages.push(x)},currentPage:page,viewport:{scrollAndZoomIntoView(){}},notify(){},listAvailableFontsAsync:async()=>[{fontName:{family:'Inter',style:'Regular'}},{fontName:{family:'Inter',style:'Semi Bold'}}],loadFontAsync:async()=>{},createImage:bytes=>({hash:'image-'+bytes.length}),createFrame:()=>create('FRAME'),createRectangle:()=>create('RECTANGLE'),createEllipse:()=>create('ELLIPSE'),createVector:()=>create('VECTOR'),createText:()=>create('TEXT')};vm.runInNewContext(code,{figma,__html__:'',Uint8Array,Map,Set});return{figma,nodes,messages};
+  const createText=()=>{const n=create('TEXT');let w=100,h=100;const lines=()=>String(n.characters||'').split('\n');Object.defineProperties(n,{width:{get(){return n.textAutoResize==='WIDTH_AND_HEIGHT'?Math.max(...lines().map(s=>s.length))*(n.fontSize||12)*.6:w;},set(v){w=v;}},height:{get(){return ['WIDTH_AND_HEIGHT','HEIGHT'].includes(n.textAutoResize)?lines().length*(n.lineHeight?.value||n.fontSize||12):h;},set(v){h=v;}}});return n;};
+  const figma={showUI(){},ui:{postMessage:x=>messages.push(x)},currentPage:page,viewport:{scrollAndZoomIntoView(){}},notify(){},listAvailableFontsAsync:async()=>[{fontName:{family:'Inter',style:'Regular'}},{fontName:{family:'Inter',style:'Semi Bold'}}],loadFontAsync:async()=>{},createImage:bytes=>({hash:'image-'+bytes.length}),createFrame:()=>create('FRAME'),createRectangle:()=>create('RECTANGLE'),createEllipse:()=>create('ELLIPSE'),createVector:()=>create('VECTOR'),createText};vm.runInNewContext(code,{figma,__html__:'',Uint8Array,Map,Set});return{figma,nodes,messages};
 }
 function data(){const tokens=parseDesignMd('---\nname: test\n---\n').tokens;const b=composeBoard({asset:{id:'a',width:600,height:800,hash:'original',name:'product'},copy:{title:'Title',body:'Literal body',detail:''},tokens,width:1080,height:1350,measure:(s,t)=>s.length*t.size*.6,fonts:{title:'Inter',body:'Inter'},id:'b'});return{schema:'studio-standard/2',tokens,boards:[b],assets:{a:{bytes:[1,2,3]}}};}
 test('A+ slot coordinates and photo-before-text ordering survive native import',async()=>{
@@ -59,4 +60,21 @@ test('new importer creates editable vector paths plus exact native text, and rep
 test('new reconstruction package with no native editable content is refused, not reported as conversion success',async()=>{
   const h=host();await h.figma.ui.onmessage({type:'import',data:{schema:'studio-reconstruction/2',assets:{},boards:[{width:100,height:100,nodes:[]}]}});
   assert.equal(h.messages[0].ok,false);assert.match(h.messages[0].message,/没有可编辑/);assert.equal(h.nodes.length,0);
+});
+
+test('legacy bitmap-only files and mixed batches cannot report editable conversion success',async()=>{
+  const png=[137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,100,0,0,0,100];
+  const bitmap={name:'original-only',width:100,height:100,nodes:[{id:'raster',name:'bitmap',type:'IMAGE',assetId:'r',hash:'',x:0,y:0,width:100,height:100}]};
+  const native={name:'editable',width:100,height:100,nodes:[{id:'text',name:'copy',type:'TEXT',characters:'Original',fontFamily:'Inter',fontSize:12,fontWeight:400,lineHeight:1.2,color:'#000000',x:0,y:0,width:80,height:30}]};
+  for(const schema of ['studio-reconstruction/1','studio-reconstruction/2']) for(const boards of [[bitmap],[native,bitmap]]) {
+    const h=host();await h.figma.ui.onmessage({type:'import',data:{schema,assets:{r:{bytes:png}},boards}});
+    assert.equal(h.messages[0].ok,false);assert.match(h.messages[0].message,/original-only.*没有可编辑/);assert.equal(h.nodes.length,0);
+  }
+});
+
+test('Figma font substitution fits exact copy into its original box without adding line breaks',async()=>{
+  const h=host(),characters='500+ BOUGHT\nPAST MONTH';
+  await h.figma.ui.onmessage({type:'import',data:{schema:'studio-reconstruction/2',assets:{},boards:[{id:'real-size',name:'real size regression',width:1792,height:2688,nodes:[{id:'copy',type:'TEXT',name:'rating',x:1200,y:2145,width:420,height:150,characters,fontFamily:'Missing condensed font',fontSize:250,fontWeight:700,lineHeight:1,color:'#000000'}]}]}});
+  assert.equal(h.messages[0].ok,true);const text=h.figma.currentPage.children[0].children[0];
+  assert.equal(text.characters,characters);assert.equal(text.pluginData.originalCharacters,characters);assert.equal(text.locked,false);assert.ok(text.fontSize<250);assert.ok(text.height<=150);assert.equal(text.width,420);assert.match(h.messages[0].notes.join(' '),/实际字体适配字号/);
 });

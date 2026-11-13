@@ -1,4 +1,4 @@
-import { SCHEMA, dimensions, normalizeResult, inspectRegion, enabledLayers, boardFor, cleanRaster, pathCommands } from './lib/reconstruction.js';
+import { SCHEMA, dimensions, normalizeResult, inspectRegion, enabledLayers, boardFor, cleanRaster, pathCommands, analysisRegions, mergeRegionLayers, fitTextToBox } from './lib/reconstruction.js';
 
 const $ = id => document.getElementById(id);
 const state = { assets: [], selected: null, layer: null, view: 'rebuilt', drawing: false, busy: false, editorDirty: false, editorKey: '', pending: [], config: { useCustom: false }, server: null };
@@ -26,19 +26,14 @@ async function recheck(asset) {
   c.width = c.height = 1;
 }
 function textLines(ctx, layer) {
-  const lines = [];
-  for (const paragraph of layer.characters.split('\n')) {
-    if (!paragraph) { lines.push(''); continue; }
-    let line = '';
-    for (const piece of paragraph.match(/\S+\s*|\s+/g) || [paragraph]) {
-      if (ctx.measureText(line + piece).width <= layer.width) { line += piece; continue; }
-      if (line) { lines.push(line.trimEnd()); line = ''; }
-      if (ctx.measureText(piece).width <= layer.width) { line = piece; continue; }
-      for (const ch of piece) { if (line && ctx.measureText(line + ch).width > layer.width) { lines.push(line); line = ''; } line += ch; }
-    }
-    lines.push(line.trimEnd());
-  }
-  return lines;
+  return layer.characters.split('\n');
+}
+function fitModelText(layers) {
+  const ctx = canvas(1, 1).getContext('2d');
+  return layers.map(layer => fitTextToBox(layer, (text, style) => {
+    ctx.font = style.fontWeight + ' ' + style.fontSize + 'px ' + JSON.stringify(style.fontFamily) + ', Arial, sans-serif';
+    return ctx.measureText(text).width;
+  }));
 }
 function drawLayer(ctx, layer) {
   ctx.fillStyle = layer.color;
@@ -83,9 +78,10 @@ function renderSelection(box = selectedLayer()) {
 }
 function updateExport() {
   const native = state.assets.reduce((n, a) => n + a.layers.filter(l => l.enabled).length, 0);
-  const eligible = native && state.assets.length && state.assets.every(a => a.reviewed && !a.overflow?.length) && !state.busy && !state.editorDirty;
+  const bitmapOnly = state.assets.filter(a => !a.layers.some(l => l.enabled));
+  const eligible = native && !bitmapOnly.length && state.assets.every(a => a.reviewed && !a.overflow?.length) && !state.busy && !state.editorDirty;
   $('export-open').disabled = !eligible;
-  $('export-reason').textContent = state.busy ? '正在处理图片…' : state.editorDirty ? '请先应用图层修改' : !state.assets.length ? '先上传图片并分析' : !native ? '尚无可编辑文字或图形，请分析或调整候选' : state.assets.some(a => a.overflow?.length) ? '请调整超出边界的文字' : state.assets.some(a => !a.reviewed) ? '请在预览下方逐图勾选核对' : native + ' 个原生图层 · 可以导出';
+  $('export-reason').textContent = state.busy ? '正在处理图片…' : state.editorDirty ? '请先应用图层修改' : !state.assets.length ? '先上传图片并分析' : bitmapOnly.length ? bitmapOnly.map(a => a.name).join('、') + '：尚无可编辑文字或图形，请分析或调整候选' : state.assets.some(a => a.overflow?.length) ? '请调整超出边界的文字' : state.assets.some(a => !a.reviewed) ? '请在预览下方逐图勾选核对' : native + ' 个原生图层 · 可以导出';
   $('asset-reviewed').disabled = state.busy || state.editorDirty || !!current()?.overflow?.length;
   $('asset-reviewed').checked = !!current()?.reviewed;
 }
@@ -94,7 +90,7 @@ function renderEditor() {
   const key = current().id + '/' + l.id;
   if (state.editorDirty && state.editorKey === key) return;
   state.editorDirty = false; state.editorKey = key;
-  $('layer-check').textContent = l.check?.reason || '等待检查'; $('layer-check').className = 'check-note' + (l.check?.safe ? ' safe' : '');
+  $('layer-check').textContent = [l.fitNote, l.check?.reason || '等待检查'].filter(Boolean).join('\n'); $('layer-check').className = 'check-note' + (l.check?.safe ? ' safe' : '');
   $('layer-enabled').checked = l.enabled; $('layer-enabled').disabled = state.busy || !l.check?.safe;
   $('layer-text').value = l.characters || ''; $('copy-label').hidden = l.type !== 'TEXT'; $('size-label').hidden = l.type !== 'TEXT'; $('family-label').hidden = l.type !== 'TEXT';
   $('layer-color').value = l.color; $('layer-font-size').value = l.fontSize || 24; $('layer-font').value = l.fontFamily || 'Arial';
@@ -181,6 +177,8 @@ $('layer-editor').onsubmit = async e => {
     try { next.vectorPaths = l.vectorPaths.map(p => ({ ...p, data: pathCommands(p.data, l.width, l.height).map(({command, values}) => command + (values.length ? ' ' + values.map((v, i) => Number((v * (i % 2 ? next.height / l.height : next.width / l.width)).toFixed(4))).join(' ') : '')).join(' ') })); } catch (error) { return toast(error.message); }
   }
   next.confidence = 1; // Applying an explicit user correction confirms this candidate, not the untouched model guesses.
+  delete next.fitNote; delete next.fontSizeEstimate;
+  delete l.fitNote; delete l.fontSizeEstimate;
   Object.assign(l, next); state.editorDirty = false; l.enabled = false; await recheck(a); changed(a); render(); toast('已重新检查，请核对后重新启用。');
 };
 let startPoint;
@@ -227,19 +225,16 @@ function requestAnalysis(assets) {
   if (!state.config.useCustom && !state.server?.configured) { toast('请先配置支持图片输入的视觉模型。'); $('settings-open').click(); return; }
   state.pending = assets.map(a => a.id);
   const config = state.config.useCustom ? state.config : state.server;
-  $('consent-copy').textContent = '将发送 ' + assets.length + ' 张图片到 ' + config.baseUrl + '，使用模型 ' + config.model + '。服务商可能收取费用；失败不会自动重试。';
+  const count = assets.reduce((n, a) => n + analysisRegions(a.width, a.height).length, 0);
+  $('consent-copy').textContent = '将发送 ' + assets.length + ' 张图片到 ' + config.baseUrl + '，使用模型 ' + config.model + '。共 ' + count + ' 个分区、' + count + ' 次模型请求，按原图坐标合并；服务商可能按请求收费。失败不会自动重试，本图任一分区失败则保留原候选。';
   $('consent-dialog').showModal();
 }
 $('analyze-one').onclick = () => requestAnalysis(current() ? [current()] : []);
 $('analyze-all').onclick = () => requestAnalysis(state.assets);
 function resized(c, x, y, w, h, max = 1800) { const scale = Math.min(1, max / Math.max(w, h)), target = canvas(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale))); target.getContext('2d').drawImage(c, x, y, w, h, 0, 0, target.width, target.height); const url = target.toDataURL('image/png'); target.width = target.height = 1; return url; }
-async function analysisInput(a) {
-  const c = await sourceCanvas(a), image = resized(c, 0, 0, c.width, c.height), tiles = [];
-  if (a.height / a.width > 2 || a.width / a.height > 2) {
-    const vertical = a.height > a.width, long = vertical ? a.height : a.width, short = vertical ? a.width : a.height, count = Math.min(6, Math.ceil(long / (short * 1.3))), step = long / count;
-    for (let i = 0; i < count; i++) { const from = Math.max(0, Math.floor(i * step - step * .06)), to = Math.min(long, Math.ceil((i + 1) * step + step * .06)); const x = vertical ? 0 : from, y = vertical ? from : 0, w = vertical ? short : to - from, h = vertical ? to - from : short; tiles.push({ image: resized(c, x, y, w, h), bbox: [x / a.width, y / a.height, w / a.width, h / a.height] }); }
-  }
-  c.width = c.height = 1; return { image, tiles, width: a.width, height: a.height, config: state.config.useCustom ? { ...state.config } : { useCustom: false } };
+async function analysisInput(a, region) {
+  const c = await sourceCanvas(a), image = resized(c, region.x, region.y, region.width, region.height);
+  c.width = c.height = 1; return { image, width: region.width, height: region.height, config: state.config.useCustom ? { ...state.config } : { useCustom: false } };
 }
 $('consent-confirm').onclick = async () => {
   $('consent-dialog').close(); if (state.busy) return; state.busy = true;
@@ -247,15 +242,23 @@ $('consent-confirm').onclick = async () => {
   for (const id of ids) {
     const a = state.assets.find(x => x.id === id); if (!a) continue; state.selected = id; state.layer = null; a.error = ''; a.notes = '正在分析：' + a.name + '。请等待模型响应…'; render();
     try {
-      const response = await fetch('/api/reconstruct', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(await analysisInput(a)), signal: AbortSignal.timeout(200000) });
-      let data; try { data = await response.json(); } catch { throw new Error('网站服务返回了非 JSON 响应，请检查部署日志；原图与候选未改动。'); }
-      if (!response.ok) throw new Error(data.error || '分析失败。');
+      const regions = analysisRegions(a.width, a.height), results = [], notes = [];
+      for (const [index, region] of regions.entries()) {
+        a.notes = `正在分析：${a.name} · 分区 ${index + 1} / ${regions.length}，已完成分区暂存，全部成功后才替换原候选。`; render();
+        const response = await fetch('/api/reconstruct', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(await analysisInput(a, region)), signal: AbortSignal.timeout(200000) });
+        let data; try { data = await response.json(); } catch { throw new Error('网站服务返回了非 JSON 响应，请检查部署日志；原图与候选未改动。'); }
+        if (!response.ok) throw new Error(`分区 ${index + 1}/${regions.length}：` + (data.error || '分析失败。'));
+        // Validate each local result before adding its original-image offset.
+        const local = normalizeResult({ layers: data.layers.map(l => inputLayer(l, region)) }, region.width, region.height);
+        results.push({ region, layers: local }); if (data.notes) notes.push(data.notes);
+      }
       // Re-validate server results at the browser boundary, never trust supplied checks or enabled flags.
-      const normalized = normalizeResult({ layers: data.layers.map(l => inputLayer(l, a)) }, a.width, a.height);
+      const normalized = fitModelText(mergeRegionLayers(results, a.width, a.height));
       const previous = a.layers; a.layers = normalized;
       try { await recheck(a); } catch (error) { a.layers = previous; throw error; }
       for (const l of a.layers) if (l.check.safe) { l.enabled = true; try { enabledLayers(a.layers); } catch { l.enabled = false; l.check.reason += ' 与其他候选冲突，请只启用一项。'; } }
-      a.analyzed = true; a.notes = (data.notes || '分析完成。') + '\n通过检查的文字与图形已准备为原生图层。字体为推测，照片背景为近似修补；请核对原文、路径与重影后确认。未通过检查的候选不会冒充可编辑图层。'; changed(a); succeeded++;
+      const enabled = a.layers.filter(l => l.enabled);
+      a.analyzed = true; a.notes = `已合并 ${regions.length} 个分区：${enabled.filter(l => l.type === 'TEXT').length} 个文字层、${enabled.filter(l => l.type !== 'TEXT').length} 个矢量图形可编辑；${a.layers.length - enabled.length} 个候选需调整。\n` + notes.join('\n').slice(0, 2200) + '\n字体与字号为推测并按原文字框适配，原文和显式换行保留。请核对原文、路径、重影与背景近似修补。'; changed(a); succeeded++;
     } catch (error) { a.error = error.name === 'TimeoutError' ? '请求超时，未自动重试。建议先分析单个模块。' : error.message; a.notes = ''; }
     render();
   }
@@ -310,7 +313,7 @@ $('export-open').onclick = () => {
   $('export-error').textContent = ''; $('export-dialog').showModal();
 };
 $('download-package').onclick = async () => {
-  if (state.busy || state.editorDirty || !state.assets.every(a => a.reviewed) || !state.assets.some(a => a.layers.some(l => l.enabled))) return;
+  if (state.busy || state.editorDirty || !state.assets.length || !state.assets.every(a => a.reviewed && a.layers.some(l => l.enabled))) return;
   state.busy = true; $('download-package').disabled = true; $('export-error').textContent = ''; render();
   try {
     if (!globalThis.JSZip) throw new Error('导出组件加载失败，请刷新页面。');

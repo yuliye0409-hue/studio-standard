@@ -37,7 +37,9 @@ figma.ui.onmessage = async message => {
       const dimension = offset => b[offset] * 16777216 + b[offset + 1] * 65536 + b[offset + 2] * 256 + b[offset + 3];
       if (![dimension(16), dimension(20)].every(n => n > 0 && n <= 4096)) throw new Error('单个图片资源超过 4096px，请使用新版工作台重新导出切片。');
     }
-    if (data.schema === 'studio-reconstruction/2' && !data.boards.some(b => b.nodes.some(n => ['TEXT','RECTANGLE','ELLIPSE','VECTOR'].includes(n.type)))) throw new Error('文件没有可编辑文字或矢量图层，请回工作台分析并启用图层后重新导出。');
+    if (reconstruction) for (const board of data.boards) {
+      if (!board.nodes.some(n => ['TEXT','RECTANGLE','ELLIPSE','VECTOR'].includes(n.type) && n.visible !== false && n.locked !== true)) throw new Error(`${board.name || '画板'}：没有可编辑文字或矢量图层。这个文件只包含位图，请回工作台重新分析并启用图层后导出；插件不能从图片节点中恢复文字。`);
+    }
     const available = (await figma.listAvailableFontsAsync()).map(x => x.fontName);
     const findFont = async node => {
       const cjk = /[\u2e80-\u9fff]/.test(node.characters);
@@ -75,6 +77,19 @@ figma.ui.onmessage = async message => {
           const font = await findFont(source); node = figma.createText(); frame.appendChild(node); node.fontName = font; node.characters = source.characters; node.fontSize = source.fontSize;
           node.lineHeight = { unit: 'PIXELS', value: source.fontSize * source.lineHeight }; node.letterSpacing = { unit: 'PIXELS', value: source.letterSpacing || 0 };
           node.textAlignHorizontal = source.align === 'center' ? 'CENTER' : source.align === 'right' ? 'RIGHT' : 'LEFT'; node.fills = [{ type: 'SOLID', color: hexColor(source.color) }];
+          if (reconstruction) {
+            // Measure the actual Figma font, including substitutions. Do not add soft wraps to source copy.
+            node.textAutoResize = 'WIDTH_AND_HEIGHT';
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const scale = Math.min(1, (source.width - .5) / Math.max(1, node.width), (source.height - .5) / Math.max(1, node.height));
+              if (scale >= 1) break;
+              const size = Math.floor(node.fontSize * scale * 4) / 4;
+              if (size < 1) throw new Error(`${source.name}：Figma 字体无法放入原文字框，请回工作台扩大区域。`);
+              node.fontSize = size; node.lineHeight = { unit: 'PIXELS', value: size * source.lineHeight };
+            }
+            if (node.width > source.width || node.height > source.height) throw new Error(`${source.name}：Figma 文字尺寸仍超出原区域，请调整字体或区域。`);
+            if (node.fontSize !== source.fontSize) notes.push(`${board.name} / ${source.name}：按 Figma 实际字体适配字号 ${source.fontSize}px → ${node.fontSize}px；原文与显式换行不变。`);
+          }
           node.resize(source.width, Math.max(1, source.height)); node.textAutoResize = 'HEIGHT';
           if (Math.abs(node.height - source.height) > 4) notes.push(`${board.name} / ${source.name}：Figma 文字高度 ${Math.round(node.height)}px，浏览器 ${Math.round(source.height)}px，请复核换行与字体。`);
           node.setPluginData('originalCharacters', source.characters);

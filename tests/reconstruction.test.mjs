@@ -1,9 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { color, normalizeResult, inspectRegion, enabledLayers, boardFor, dimensions, cleanRaster } from '../lib/reconstruction.js';
+import { color, normalizeResult, inspectRegion, enabledLayers, boardFor, dimensions, cleanRaster, analysisRegions, mergeRegionLayers, fitTextToBox } from '../lib/reconstruction.js';
 import { parseProvider, reconstruct, providerConfig } from '../lib/reconstruction-api.js';
 const text = { type: 'TEXT', name: '原文', bbox: [.1,.1,.6,.5], text: 'Exact  文案\n100% <&>', color: '#000', confidence: .95, fontSize: 12, fontWeight: 700, fontFamily: 'Arial', lineHeight: 1.2 };
 const layer = () => normalizeResult({ layers: [text] }, 100, 100)[0];
+test('large-image regions cover original coordinates with overlap and a bounded request count',()=>{
+  for(const [w,h] of [[1792,2688],[1500,7995],[4000,4000],[16384,1000]]) {
+    const regions=analysisRegions(w,h);assert.ok(regions.length>1&&regions.length<=6);
+    for(const r of regions)assert.ok(r.x>=0&&r.y>=0&&r.x+r.width<=w&&r.y+r.height<=h);
+    for(let y=0;y<h;y+=99)for(let x=0;x<w;x+=99)assert.ok(regions.some(r=>x>=r.x&&x<r.x+r.width&&y>=r.y&&y<r.y+r.height));
+  }
+  assert.deepEqual(analysisRegions(1000,600),[{x:0,y:0,width:1000,height:600}]);
+});
+test('region merge restores global positions, deduplicates overlap and preserves local vector paths',()=>{
+  const a={...layer(),x:10,y:20,width:60,height:50};
+  const v={type:'VECTOR',x:1,y:1,width:20,height:10,color:'#000000',confidence:.9,vectorPaths:[{data:'M 0 0 L 20 0 L 20 10 Z',windingRule:'EVENODD'}]};
+  const merged=mergeRegionLayers([{region:{x:0,y:100},layers:[a,v]},{region:{x:0,y:110},layers:[{...a,y:10,confidence:.99}]}],200,300);
+  assert.equal(merged.length,2);assert.equal(merged[0].y,120);assert.equal(merged[0].confidence,.99);assert.equal(merged[1].y,101);assert.equal(merged[1].vectorPaths[0].data,v.vectorPaths[0].data);assert.notEqual(merged[0].id,merged[1].id);
+  assert.throws(()=>mergeRegionLayers([{region:{x:0,y:290},layers:[a]}],200,300),/超出/);
+});
+test('oversized model font estimates adapt to the box while preserving literal spaces and hard breaks',()=>{
+  const source={...layer(),characters:'500+  BOUGHT\nPAST MONTH',fontSize:250,width:420,height:150,lineHeight:1};
+  const fitted=fitTextToBox(source,(s,l)=>s.length*l.fontSize*.6);
+  assert.equal(fitted.characters,source.characters);assert.ok(fitted.fontSize<250);assert.ok(fitted.fontSize*2<=150);assert.equal(fitted.fontSizeEstimate,250);assert.equal(source.fontSize,250);
+  assert.equal(fitTextToBox({...source,fontSize:12},(s,l)=>s.length*l.fontSize*.6).fontSize,12);
+});
 function pixels(draw) { const data = new Uint8ClampedArray(100 * 100 * 4); data.fill(255); const put = (x,y,c) => data.set([...c,255], (y * 100 + x) * 4); draw?.(put); return data; }
 test('exact text and original coordinates survive normalization; shorthand/RGB colors are normalized', () => {
   const l = layer(); assert.equal(l.characters, text.text); assert.equal(l.enabled, false); assert.deepEqual([l.x,l.y,l.width,l.height],[10,10,60,50]); assert.equal(l.color,'#000000'); assert.equal(color('rgb(255, 80, 0)'), '#ff5000'); assert.throws(() => color('rgb(999,0,0)')); assert.throws(() => dimensions(16384,16384)); assert.throws(() => normalizeResult({ layers: [{...text,bbox:[.9,0,.5,.5]}] },100,100));
@@ -75,8 +96,9 @@ test('overlapping clear regions reject export; disabled candidates leave origina
   const l=layer(); l.check={safe:true,background:'#ffffff'}; l.enabled=true;
   assert.throws(()=>enabledLayers([l,{...l,id:'other'}]),/重叠/);
   assert.throws(()=>enabledLayers([{...l,check:{safe:false}}]),/检查/);
-  const board=boardFor({id:'a',name:'image',width:100,height:100,layers:[{...l,enabled:false}]},'base','original');
-  assert.equal(board.nodes.length,2);assert.equal(board.nodes[0].visible,false);assert.equal(board.nodes[1].assetId,'base');assert.equal(board.width,100);
+  assert.throws(()=>boardFor({id:'a',name:'image',width:100,height:100,layers:[{...l,enabled:false}]},'base','original'),/没有可编辑/);
+  const board=boardFor({id:'a',name:'image',width:100,height:100,layers:[l]},'base','original');
+  assert.equal(board.nodes.length,3);assert.equal(board.nodes[0].visible,false);assert.equal(board.nodes[1].assetId,'base');assert.equal(board.width,100);
 });
 test('long image tile positions preserve full original canvas and native text positions',()=>{
   const l={...layer(),enabled:true,check:{safe:true},y:5000};

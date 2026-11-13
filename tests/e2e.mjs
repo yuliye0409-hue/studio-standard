@@ -55,7 +55,7 @@ try {
     x.fillStyle='#efe5d7';x.beginPath();x.moveTo(675,350);x.lineTo(875,350);x.lineTo(900,366);x.lineTo(900,414);x.lineTo(875,430);x.lineTo(675,430);x.lineTo(650,414);x.lineTo(650,366);x.closePath();x.fill();
     x.font='bold 24px Arial';x.fillStyle='#000';x.fillText('4.5 STARS',700,370);
     const normal = c.toDataURL('image/png');
-    c.width=1500;c.height=7995;x.fillStyle='#fafafa';x.fillRect(0,0,1500,7995);x.fillStyle='#184b6a';x.fillRect(40,4200,1420,3700);
+    c.width=1500;c.height=7995;x.fillStyle='#fafafa';x.fillRect(0,0,1500,7995);x.fillStyle='#184b6a';x.fillRect(40,4200,1420,3700);x.font='48px Arial';x.textBaseline='top';x.fillStyle='#000000';x.fillText('LONG IMAGE COPY',70,100);
     return { normal, long:c.toDataURL('image/png') };
   });
   const file = (url,name) => ({name,mimeType:'image/png',buffer:Buffer.from(url.split(',')[1],'base64')});
@@ -103,11 +103,15 @@ try {
   await page.locator('#settings-open').click();assert.equal(await page.locator('#config-key').inputValue(),'');await page.locator('#settings-dialog [data-close]').click();
   await page.locator('#asset-reviewed').check();
   pass('project saves/restores genuine layers, requires re-review, and never persists personal keys');
-  // Add a long original without asking a model: exporting a raster-only image must remain explicit.
+  // A mixed batch must refuse a bitmap-only board, even when another board has editable content.
   const longFile=file(images.long,'long-original.png');
   await page.locator('#dropzone').evaluate((zone,payload)=>{const transfer=new DataTransfer();transfer.items.add(new File([Uint8Array.from(atob(payload.b64),c=>c.charCodeAt(0))],payload.name,{type:'image/png'}));zone.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}));},{name:longFile.name,b64:longFile.buffer.toString('base64')});
   await page.waitForFunction(()=>document.querySelectorAll('.asset-card').length===2&&document.querySelector('#preview-canvas').height===7995);
-  await page.locator('#asset-reviewed').check();await page.locator('#export-open').click();
+  await page.locator('#asset-reviewed').check();assert.equal(await page.locator('#export-open').isDisabled(),true);assert.match(await page.locator('#export-reason').textContent(),/long-original.png/);
+  await page.locator('#manual-add').click();const lb=await page.locator('#preview-canvas').boundingBox();
+  await page.mouse.move(lb.x+lb.width*.03,lb.y+lb.height*.01);await page.mouse.down();await page.mouse.move(lb.x+lb.width*.8,lb.y+lb.height*.03);await page.mouse.up();
+  await page.locator('#layer-text').fill('LONG IMAGE COPY');await page.locator('#layer-font-size').fill('48');await page.locator('#layer-editor button[type=submit]').click();
+  await page.waitForFunction(()=>!document.querySelector('#layer-enabled').disabled);await page.locator('#layer-enabled').check();await page.locator('#view-rebuilt').click();await page.locator('#asset-reviewed').check();await page.locator('#export-open').click();
   const zip=await JSZip.loadAsync(await download('#download-package'));
   const data=JSON.parse(await zip.file('figma-import.json').async('string'));
   assert.equal(data.schema,'studio-reconstruction/2');assert.equal(data.boards.length,2);assert.equal(data.boards[1].height,7995);
@@ -116,8 +120,8 @@ try {
   assert.equal(originalBoard.nodes.filter(n=>n.type==='RECTANGLE').length,1);
   assert.equal(originalBoard.nodes.filter(n=>n.type==='VECTOR').length,1);assert.match(originalBoard.nodes.find(n=>n.type==='VECTOR').vectorPaths[0].data,/L 250 16/);
   assert.ok(originalBoard.nodes.findIndex(n=>n.type==='VECTOR')<originalBoard.nodes.findIndex(n=>n.characters==='4.5 STARS'));
-  assert.equal(longBoard.nodes.filter(n=>n.type==='TEXT').length,0);
-  assert.deepEqual(longBoard.nodes.filter(n=>n.visible!==false).map(n=>[n.y,n.width,n.height]),[[0,1500,4096],[4096,1500,3899]]);
+  assert.equal(longBoard.nodes.filter(n=>n.type==='TEXT').length,1);assert.equal(longBoard.nodes.find(n=>n.type==='TEXT').characters,'LONG IMAGE COPY');
+  assert.deepEqual(longBoard.nodes.filter(n=>n.type==='IMAGE'&&n.visible!==false).map(n=>[n.y,n.width,n.height]),[[0,1500,4096],[4096,1500,3899]]);
   for (const asset of Object.values(data.assets)) {const bytes=Buffer.from(asset.dataUrl.split(',')[1],'base64');assert.ok(bytes.readUInt32BE(16)<=4096);assert.ok(bytes.readUInt32BE(20)<=4096);}
   const baseNode=originalBoard.nodes.find(n=>n.type==='IMAGE'&&n.visible!==false);
   const pixels=await page.evaluate(async url=>{const i=new Image();i.src=url;await i.decode();const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d');x.drawImage(i,0,0);return { header:Array.from(x.getImageData(40,30,600,100).data), shape:Array.from(x.getImageData(797,47,106,76).data), photo:Array.from(x.getImageData(300,300,1,1).data)};},data.assets[baseNode.assetId].dataUrl);
